@@ -36,8 +36,12 @@ The Express server serves `client/dist` and Socket.IO on the same origin (port f
 
 ## Deploy (GitHub + Render)
 
-1. Push this repo to GitHub (already wired via `render.yaml`).
-2. In the [Render Dashboard](https://dashboard.render.com), create a new **Blueprint** and select this repository.
+Repo: https://github.com/cardozotm/bpmn-shared-session
+
+**One-click Blueprint:** [Deploy to Render](https://dashboard.render.com/blueprint/new?repo=https://github.com/cardozotm/bpmn-shared-session)
+
+1. Open the link above (or in the [Render Dashboard](https://dashboard.render.com), create a new **Blueprint** and select this repository).
+2. Connect GitHub if prompted, then **Deploy Blueprint**.
 3. Render runs `npm install && npm run build`, then `npm start`, with `NODE_ENV=production`.
 4. Open the public URL, hit `/health`, and share a room between two browsers.
 
