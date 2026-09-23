@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: bpmn-shared-session
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
