@@ -37,19 +37,22 @@ const rooms = new RoomStore();
 
 io.on('connection', (socket) => {
   let currentRoomId: string | null = null;
+  let currentClientId: string | null = null;
 
   socket.on('room:create', (payload, callback) => {
     try {
       if (currentRoomId) {
-        leaveCurrentRoom();
+        leaveExplicit();
       }
 
       const snapshot = rooms.create(
+        payload?.clientId ?? '',
         socket.id,
         payload?.name ?? '',
         EMPTY_DIAGRAM_XML
       );
       currentRoomId = snapshot.roomId;
+      currentClientId = payload.clientId;
       void socket.join(snapshot.roomId);
       callback({ ok: true, snapshot });
     } catch (error) {
@@ -62,16 +65,18 @@ io.on('connection', (socket) => {
 
   socket.on('room:join', (payload, callback) => {
     try {
-      if (currentRoomId) {
-        leaveCurrentRoom();
+      if (currentRoomId && currentRoomId !== payload.roomId.trim().toUpperCase()) {
+        leaveExplicit();
       }
 
       const snapshot = rooms.join(
         payload.roomId,
+        payload?.clientId ?? '',
         socket.id,
         payload?.name ?? ''
       );
       currentRoomId = snapshot.roomId;
+      currentClientId = payload.clientId;
       void socket.join(snapshot.roomId);
       socket.to(snapshot.roomId).emit('presence:state', {
         participants: snapshot.participants,
@@ -89,6 +94,20 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('room:leave', (payload, callback) => {
+    const roomId = currentRoomId;
+    leaveExplicit(payload?.clientId ?? currentClientId);
+    callback?.({ ok: true });
+    if (roomId) {
+      const snapshot = rooms.getSnapshot(roomId);
+      if (snapshot) {
+        socket.to(roomId).emit('presence:state', {
+          participants: snapshot.participants,
+        });
+      }
+    }
+  });
+
   socket.on('diagram:update', (payload, callback) => {
     const result = rooms.applyDiagramUpdate(
       payload.roomId,
@@ -97,11 +116,11 @@ io.on('connection', (socket) => {
       payload.xml
     );
 
-    if (result.ok) {
+    if (result.ok && result.clientId) {
       socket.to(payload.roomId).emit('diagram:state', {
         xml: payload.xml,
         revision: result.revision,
-        fromSocketId: socket.id,
+        fromClientId: result.clientId,
       });
     }
 
@@ -121,26 +140,48 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    leaveCurrentRoom();
-  });
-
-  function leaveCurrentRoom(): void {
     if (!currentRoomId) {
       return;
     }
 
     const roomId = currentRoomId;
     currentRoomId = null;
+    currentClientId = null;
     void socket.leave(roomId);
 
-    const leaveResult = rooms.leave(socket.id);
+    rooms.beginDisconnect(socket.id, (expiredRoomId, participants) => {
+      io.to(expiredRoomId).emit('presence:state', { participants });
+    });
+  });
+
+  function leaveExplicit(clientId: string | null = currentClientId): void {
+    if (!currentRoomId && !clientId) {
+      return;
+    }
+
+    const roomId = currentRoomId;
+    const id = clientId ?? currentClientId;
+    currentRoomId = null;
+    currentClientId = null;
+
+    if (roomId) {
+      void socket.leave(roomId);
+    }
+
+    if (!id) {
+      return;
+    }
+
+    const leaveResult = rooms.leave(id);
     if (!leaveResult) {
       return;
     }
 
-    socket.to(roomId).emit('presence:state', {
-      participants: leaveResult.participants,
-    });
+    if (roomId) {
+      socket.to(roomId).emit('presence:state', {
+        participants: leaveResult.participants,
+      });
+    }
   }
 });
 

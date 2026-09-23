@@ -5,19 +5,26 @@ import {
   type RoomSnapshot,
 } from './types.js';
 
-const ROOM_IDLE_TTL_MS = 60_000;
+/** Keep empty rooms (and their XML) for 24h after the last explicit leave. */
+export const ROOM_IDLE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Wait before freeing a seat after a transport disconnect (reconnect window). */
+export const DISCONNECT_GRACE_MS = 45_000;
 
 export interface Participant {
+  clientId: string;
   socketId: string;
   name: string;
   color: (typeof PARTICIPANT_COLORS)[number];
   selectedElementId: string | null;
+  disconnectTimer: ReturnType<typeof setTimeout> | null;
 }
 
 export interface Room {
   id: string;
   xml: string;
   revision: number;
+  /** Keyed by clientId */
   participants: Map<string, Participant>;
   idleTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -25,6 +32,7 @@ export interface Room {
 export interface RoomStoreOptions {
   now?: () => number;
   idleTtlMs?: number;
+  disconnectGraceMs?: number;
   codeGenerator?: () => string;
 }
 
@@ -41,28 +49,42 @@ export class RoomStore {
   private rooms = new Map<string, Room>();
   private readonly now: () => number;
   private readonly idleTtlMs: number;
+  private readonly disconnectGraceMs: number;
   private readonly codeGenerator: () => string;
 
   constructor(options: RoomStoreOptions = {}) {
     this.now = options.now ?? Date.now;
     this.idleTtlMs = options.idleTtlMs ?? ROOM_IDLE_TTL_MS;
+    this.disconnectGraceMs = options.disconnectGraceMs ?? DISCONNECT_GRACE_MS;
     this.codeGenerator = options.codeGenerator ?? defaultCode;
   }
 
-  create(socketId: string, name: string, initialXml: string): RoomSnapshot {
+  create(
+    clientId: string,
+    socketId: string,
+    name: string,
+    initialXml: string
+  ): RoomSnapshot {
+    const id = sanitizeClientId(clientId);
+    if (!id) {
+      throw new RoomError('INVALID_CLIENT', 'clientId inválido.');
+    }
+
     const roomId = this.allocateCode();
     const participant: Participant = {
+      clientId: id,
       socketId,
       name: sanitizeName(name),
       color: PARTICIPANT_COLORS[0],
       selectedElementId: null,
+      disconnectTimer: null,
     };
 
     const room: Room = {
       id: roomId,
       xml: initialXml,
       revision: 0,
-      participants: new Map([[socketId, participant]]),
+      participants: new Map([[id, participant]]),
       idleTimer: null,
     };
 
@@ -70,7 +92,17 @@ export class RoomStore {
     return this.toSnapshot(room);
   }
 
-  join(roomId: string, socketId: string, name: string): RoomSnapshot {
+  join(
+    roomId: string,
+    clientId: string,
+    socketId: string,
+    name: string
+  ): RoomSnapshot {
+    const id = sanitizeClientId(clientId);
+    if (!id) {
+      throw new RoomError('INVALID_CLIENT', 'clientId inválido.');
+    }
+
     const room = this.rooms.get(normalizeRoomId(roomId));
     if (!room) {
       throw new RoomError('ROOM_NOT_FOUND', 'Sala não encontrada.');
@@ -78,7 +110,11 @@ export class RoomStore {
 
     this.clearIdleTimer(room);
 
-    if (room.participants.has(socketId)) {
+    const existing = room.participants.get(id);
+    if (existing) {
+      this.clearDisconnectTimer(existing);
+      existing.socketId = socketId;
+      existing.name = sanitizeName(name);
       return this.toSnapshot(room);
     }
 
@@ -93,38 +129,74 @@ export class RoomStore {
       PARTICIPANT_COLORS.find((candidate) => !usedColors.has(candidate)) ??
       PARTICIPANT_COLORS[1];
 
-    room.participants.set(socketId, {
+    room.participants.set(id, {
+      clientId: id,
       socketId,
       name: sanitizeName(name),
       color,
       selectedElementId: null,
+      disconnectTimer: null,
     });
 
     return this.toSnapshot(room);
   }
 
-  leave(socketId: string): { roomId: string; closed: boolean; participants: ParticipantPublic[] } | null {
-    const room = this.findRoomBySocket(socketId);
-    if (!room) {
+  /**
+   * Soft disconnect: keep the seat for a grace period so the same clientId can rejoin.
+   * When the grace expires, `onExpired` receives the post-removal presence list.
+   */
+  beginDisconnect(
+    socketId: string,
+    onExpired?: (roomId: string, participants: ParticipantPublic[]) => void
+  ): { roomId: string; participants: ParticipantPublic[] } | null {
+    const found = this.findBySocket(socketId);
+    if (!found) {
       return null;
     }
 
-    room.participants.delete(socketId);
+    const { room, participant } = found;
+    this.clearDisconnectTimer(participant);
 
-    if (room.participants.size === 0) {
-      this.scheduleIdleCleanup(room);
-      return {
-        roomId: room.id,
-        closed: false,
-        participants: [],
-      };
-    }
+    participant.disconnectTimer = setTimeout(() => {
+      participant.disconnectTimer = null;
+      // Only remove if still associated with this socket (not rejoined).
+      if (participant.socketId !== socketId) {
+        return;
+      }
+      const result = this.removeParticipant(room, participant.clientId);
+      onExpired?.(result.roomId, result.participants);
+    }, this.disconnectGraceMs);
 
     return {
       roomId: room.id,
-      closed: false,
       participants: this.toPublicParticipants(room),
     };
+  }
+
+  /** Explicit leave: free the seat immediately. Room XML stays until idle TTL. */
+  leave(
+    clientId: string
+  ): { roomId: string; participants: ParticipantPublic[] } | null {
+    const id = sanitizeClientId(clientId);
+    const found = this.findByClientId(id);
+    if (!found) {
+      return null;
+    }
+
+    const { room, participant } = found;
+    this.clearDisconnectTimer(participant);
+    return this.removeParticipant(room, id);
+  }
+
+  leaveBySocket(
+    socketId: string
+  ): { roomId: string; participants: ParticipantPublic[] } | null {
+    const found = this.findBySocket(socketId);
+    if (!found) {
+      return null;
+    }
+    this.clearDisconnectTimer(found.participant);
+    return this.removeParticipant(found.room, found.participant.clientId);
   }
 
   applyDiagramUpdate(
@@ -132,7 +204,7 @@ export class RoomStore {
     socketId: string,
     baseRevision: number,
     xml: string
-  ): DiagramUpdateResult {
+  ): DiagramUpdateResult & { clientId?: string } {
     const room = this.rooms.get(normalizeRoomId(roomId));
     if (!room) {
       return {
@@ -143,7 +215,10 @@ export class RoomStore {
       };
     }
 
-    if (!room.participants.has(socketId)) {
+    const participant = [...room.participants.values()].find(
+      (p) => p.socketId === socketId
+    );
+    if (!participant) {
       return {
         ok: false,
         error: 'Você não está nesta sala.',
@@ -173,7 +248,7 @@ export class RoomStore {
     room.xml = xml;
     room.revision += 1;
 
-    return { ok: true, revision: room.revision };
+    return { ok: true, revision: room.revision, clientId: participant.clientId };
   }
 
   updatePresence(
@@ -186,7 +261,9 @@ export class RoomStore {
       return null;
     }
 
-    const participant = room.participants.get(socketId);
+    const participant = [...room.participants.values()].find(
+      (p) => p.socketId === socketId
+    );
     if (!participant) {
       return null;
     }
@@ -204,10 +281,17 @@ export class RoomStore {
     return this.rooms.get(normalizeRoomId(roomId));
   }
 
+  getClientIdForSocket(socketId: string): string | null {
+    return this.findBySocket(socketId)?.participant.clientId ?? null;
+  }
+
   forceDelete(roomId: string): void {
     const room = this.rooms.get(normalizeRoomId(roomId));
     if (!room) {
       return;
+    }
+    for (const participant of room.participants.values()) {
+      this.clearDisconnectTimer(participant);
     }
     this.clearIdleTimer(room);
     this.rooms.delete(room.id);
@@ -215,6 +299,26 @@ export class RoomStore {
 
   size(): number {
     return this.rooms.size;
+  }
+
+  private removeParticipant(
+    room: Room,
+    clientId: string
+  ): { roomId: string; participants: ParticipantPublic[] } {
+    room.participants.delete(clientId);
+
+    if (room.participants.size === 0) {
+      this.scheduleIdleCleanup(room);
+      return {
+        roomId: room.id,
+        participants: [],
+      };
+    }
+
+    return {
+      roomId: room.id,
+      participants: this.toPublicParticipants(room),
+    };
   }
 
   private allocateCode(): string {
@@ -227,10 +331,26 @@ export class RoomStore {
     throw new Error('Unable to allocate room code');
   }
 
-  private findRoomBySocket(socketId: string): Room | undefined {
+  private findBySocket(
+    socketId: string
+  ): { room: Room; participant: Participant } | undefined {
     for (const room of this.rooms.values()) {
-      if (room.participants.has(socketId)) {
-        return room;
+      for (const participant of room.participants.values()) {
+        if (participant.socketId === socketId) {
+          return { room, participant };
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private findByClientId(
+    clientId: string
+  ): { room: Room; participant: Participant } | undefined {
+    for (const room of this.rooms.values()) {
+      const participant = room.participants.get(clientId);
+      if (participant) {
+        return { room, participant };
       }
     }
     return undefined;
@@ -252,9 +372,16 @@ export class RoomStore {
     }
   }
 
+  private clearDisconnectTimer(participant: Participant): void {
+    if (participant.disconnectTimer) {
+      clearTimeout(participant.disconnectTimer);
+      participant.disconnectTimer = null;
+    }
+  }
+
   private toPublicParticipants(room: Room): ParticipantPublic[] {
     return [...room.participants.values()].map((participant) => ({
-      id: participant.socketId,
+      id: participant.clientId,
       name: participant.name,
       color: participant.color,
       selectedElementId: participant.selectedElementId,
@@ -273,7 +400,7 @@ export class RoomStore {
 
 export class RoomError extends Error {
   constructor(
-    public readonly code: 'ROOM_NOT_FOUND' | 'ROOM_FULL',
+    public readonly code: 'ROOM_NOT_FOUND' | 'ROOM_FULL' | 'INVALID_CLIENT',
     message: string
   ) {
     super(message);
@@ -284,6 +411,10 @@ export class RoomError extends Error {
 export function sanitizeName(name: string): string {
   const trimmed = name.trim().slice(0, 32);
   return trimmed.length > 0 ? trimmed : 'Anônimo';
+}
+
+export function sanitizeClientId(clientId: string): string {
+  return clientId.trim().slice(0, 64);
 }
 
 export function normalizeRoomId(roomId: string): string {

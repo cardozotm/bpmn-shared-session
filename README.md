@@ -8,7 +8,15 @@ Web app where two users join the same room and edit a [bpmn-js](https://bpmn.io/
 - **Server**: Node.js, Express, Socket.IO (in-memory rooms)
 - **Host**: [Render](https://render.com) (single Web Service serves the built client + API)
 
-No login and no database. Rooms live in server memory while someone is connected (plus a short idle grace period after the last participant leaves, so a refresh can rejoin).
+No login and no database. Rooms live in server memory.
+
+### Resilience
+
+- Each browser gets a stable `clientId` in `localStorage`. Reconnects reuse the same seat (not a third user).
+- Transport disconnects keep the seat for **45 seconds** so a refresh or brief network blip can rejoin.
+- After the last participant leaves (or grace expires), the room XML is kept for **24 hours** while the process stays awake — leave and come back with the same room code to restore the diagram.
+- Active session (`roomId` + name) is stored in `sessionStorage` so a refresh auto-rejoins.
+- **Limit:** Render free-tier sleep/redeploy clears in-memory rooms.
 
 ## Quick start (local)
 
@@ -62,3 +70,4 @@ On the free tier the service sleeps when idle; in-memory rooms are cleared when 
 3. The server accepts the update only if `baseRevision` matches the canonical revision, then broadcasts `diagram:state`.
 4. Remote clients `importXML` with a flag so the import does not echo back; the canvas viewbox is restored so zoom does not jump.
 5. Selection changes are shared as presence so the peer outline can highlight the selected element.
+6. On Socket.IO reconnect the client re-joins with the same `clientId` and applies the server snapshot if the revision advanced.

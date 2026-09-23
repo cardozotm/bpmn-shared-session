@@ -3,9 +3,21 @@ import 'bpmn-js/dist/assets/diagram-js.css';
 import 'bpmn-js/dist/assets/bpmn-js.css';
 import 'bpmn-js/dist/assets/bpmn-font/css/bpmn-embedded.css';
 
-import { attachCollaboration } from './editor';
-import { createSocket, emitWithAck } from './socket';
-import type { ParticipantPublic, RoomSnapshot } from './types';
+import { attachCollaboration, type CollaborationHandle } from './editor';
+import {
+  clearActiveSession,
+  createSocket,
+  emitWithAck,
+  getOrCreateClientId,
+  loadActiveSession,
+  saveActiveSession,
+} from './socket';
+import type {
+  ParticipantPublic,
+  RoomCreateResult,
+  RoomJoinResult,
+  RoomSnapshot,
+} from './types';
 import './style.css';
 
 const app = document.querySelector<HTMLDivElement>('#app');
@@ -13,17 +25,67 @@ if (!app) {
   throw new Error('#app root missing');
 }
 
+const clientId = getOrCreateClientId();
 const socket = createSocket();
-let disposeCollaboration: (() => void) | null = null;
+let collaboration: CollaborationHandle | null = null;
 let modeler: BpmnModeler | null = null;
+let activeRoomId: string | null = null;
+let activeName: string | null = null;
+let inEditor = false;
+let rejoining = false;
 
 const params = new URLSearchParams(window.location.search);
 const prefilledRoom = (params.get('room') ?? '').toUpperCase();
 
+socket.on('connect', () => {
+  void handleSocketConnected();
+});
+
 renderLobby(prefilledRoom);
+
+async function handleSocketConnected(): Promise<void> {
+  if (!inEditor || !activeRoomId || !activeName || rejoining) {
+    return;
+  }
+
+  rejoining = true;
+  try {
+    const result = await emitWithAck<RoomJoinResult>((cb) =>
+      socket.emit(
+        'room:join',
+        { roomId: activeRoomId!, name: activeName!, clientId },
+        cb
+      )
+    );
+    if (!result.ok) {
+      showEditorBanner(result.error);
+      clearActiveSession();
+      activeRoomId = null;
+      activeName = null;
+      const cleanUrl = new URL(window.location.href);
+      cleanUrl.searchParams.delete('room');
+      window.history.replaceState({}, '', cleanUrl);
+      renderLobby();
+      return;
+    }
+
+    await collaboration?.applySnapshot(result.snapshot);
+    await collaboration?.flush();
+  } catch (error) {
+    showEditorBanner(
+      error instanceof Error ? error.message : 'Falha ao reconectar à sala.'
+    );
+  } finally {
+    rejoining = false;
+  }
+}
 
 function renderLobby(initialRoomId = ''): void {
   disposeSession();
+  inEditor = false;
+  activeRoomId = null;
+  activeName = null;
+
   app!.innerHTML = `
     <main class="lobby">
       <div class="lobby-card">
@@ -68,6 +130,8 @@ function renderLobby(initialRoomId = ''): void {
       : 'Conectando ao servidor…';
   };
   updateStatus();
+  socket.off('connect', updateStatus);
+  socket.off('disconnect', updateStatus);
   socket.on('connect', updateStatus);
   socket.on('disconnect', updateStatus);
 
@@ -77,14 +141,14 @@ function renderLobby(initialRoomId = ''): void {
     localStorage.setItem('bpmn-display-name', name);
     setBusy(true);
     try {
-      const result = await emitWithAck<
-        import('./types').RoomCreateResult
-      >((cb) => socket.emit('room:create', { name }, cb));
+      const result = await emitWithAck<RoomCreateResult>((cb) =>
+        socket.emit('room:create', { name, clientId }, cb)
+      );
       if (!result.ok) {
         showError(result.error);
         return;
       }
-      await openEditor(result.snapshot);
+      await openEditor(result.snapshot, name);
     } catch (error) {
       showError(error instanceof Error ? error.message : 'Falha ao criar sessão.');
     } finally {
@@ -103,14 +167,14 @@ function renderLobby(initialRoomId = ''): void {
     }
     setBusy(true);
     try {
-      const result = await emitWithAck<import('./types').RoomJoinResult>((cb) =>
-        socket.emit('room:join', { roomId, name }, cb)
+      const result = await emitWithAck<RoomJoinResult>((cb) =>
+        socket.emit('room:join', { roomId, name, clientId }, cb)
       );
       if (!result.ok) {
         showError(result.error);
         return;
       }
-      await openEditor(result.snapshot);
+      await openEditor(result.snapshot, name);
     } catch (error) {
       showError(error instanceof Error ? error.message : 'Falha ao entrar na sessão.');
     } finally {
@@ -127,9 +191,45 @@ function renderLobby(initialRoomId = ''): void {
     createBtn.disabled = busy;
     joinBtn.disabled = busy;
   }
+
+  // Resume session after refresh if we still have sessionStorage + room in URL.
+  const pending = loadActiveSession();
+  if (pending && initialRoomId && pending.roomId === initialRoomId) {
+    nameInput.value = pending.name || nameInput.value;
+    void (async () => {
+      setBusy(true);
+      try {
+        const result = await emitWithAck<RoomJoinResult>((cb) =>
+          socket.emit(
+            'room:join',
+            { roomId: pending.roomId, name: pending.name, clientId },
+            cb
+          )
+        );
+        if (!result.ok) {
+          clearActiveSession();
+          showError(result.error);
+          return;
+        }
+        await openEditor(result.snapshot, pending.name);
+      } catch (error) {
+        showError(
+          error instanceof Error ? error.message : 'Falha ao retomar a sessão.'
+        );
+      } finally {
+        setBusy(false);
+      }
+    })();
+  }
 }
 
-async function openEditor(snapshot: RoomSnapshot): Promise<void> {
+async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
+  disposeSession();
+  inEditor = true;
+  activeRoomId = snapshot.roomId;
+  activeName = name;
+  saveActiveSession(snapshot.roomId, name);
+
   const url = new URL(window.location.href);
   url.searchParams.set('room', snapshot.roomId);
   window.history.replaceState({}, '', url);
@@ -180,14 +280,14 @@ async function openEditor(snapshot: RoomSnapshot): Promise<void> {
     showBanner('Não foi possível carregar o diagrama inicial.');
   }
 
-  renderParticipants(participantsEl, snapshot.participants, socket.id ?? '');
+  renderParticipants(participantsEl, snapshot.participants, clientId);
 
-  disposeCollaboration = attachCollaboration({
+  collaboration = attachCollaboration({
     modeler,
     socket,
     roomId: snapshot.roomId,
     initialRevision: snapshot.revision,
-    localSocketId: socket.id ?? '',
+    localClientId: clientId,
     onRevision: (revision) => {
       revisionEl.textContent = `rev ${revision}`;
     },
@@ -195,7 +295,7 @@ async function openEditor(snapshot: RoomSnapshot): Promise<void> {
       showBanner(message);
     },
     onParticipants: (participants) => {
-      renderParticipants(participantsEl, participants, socket.id ?? '');
+      renderParticipants(participantsEl, participants, clientId);
     },
   });
 
@@ -204,6 +304,8 @@ async function openEditor(snapshot: RoomSnapshot): Promise<void> {
     connStatusEl.classList.toggle('warn', !socket.connected);
   };
   updateConn();
+  socket.off('connect', updateConn);
+  socket.off('disconnect', updateConn);
   socket.on('connect', updateConn);
   socket.on('disconnect', updateConn);
 
@@ -239,8 +341,14 @@ async function openEditor(snapshot: RoomSnapshot): Promise<void> {
   });
 
   leaveBtn.addEventListener('click', () => {
-    socket.disconnect();
-    socket.connect();
+    const roomId = activeRoomId;
+    if (roomId) {
+      socket.emit('room:leave', { roomId, clientId });
+    }
+    clearActiveSession();
+    activeRoomId = null;
+    activeName = null;
+    inEditor = false;
     const cleanUrl = new URL(window.location.href);
     cleanUrl.searchParams.delete('room');
     window.history.replaceState({}, '', cleanUrl);
@@ -254,6 +362,15 @@ async function openEditor(snapshot: RoomSnapshot): Promise<void> {
       bannerEl.hidden = true;
     }, 3200);
   }
+}
+
+function showEditorBanner(message: string): void {
+  const bannerEl = document.querySelector<HTMLParagraphElement>('#banner');
+  if (!bannerEl) {
+    return;
+  }
+  bannerEl.textContent = message;
+  bannerEl.hidden = false;
 }
 
 function renderParticipants(
@@ -275,8 +392,8 @@ function renderParticipants(
 }
 
 function disposeSession(): void {
-  disposeCollaboration?.();
-  disposeCollaboration = null;
+  collaboration?.dispose();
+  collaboration = null;
   if (modeler) {
     modeler.destroy();
     modeler = null;

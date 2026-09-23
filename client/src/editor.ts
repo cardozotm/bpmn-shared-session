@@ -1,27 +1,34 @@
 import type BpmnModeler from 'bpmn-js/lib/Modeler';
 import type { AppSocket } from './socket';
-import type { ParticipantPublic } from './types';
+import type { ParticipantPublic, RoomSnapshot } from './types';
 
 const DEBOUNCE_MS = 250;
 const REMOTE_SELECTION_MARKER = 'remote-selection';
+
+export interface CollaborationHandle {
+  dispose: () => void;
+  applySnapshot: (snapshot: RoomSnapshot) => Promise<void>;
+  flush: () => Promise<void>;
+  getRevision: () => number;
+}
 
 interface SyncOptions {
   modeler: BpmnModeler;
   socket: AppSocket;
   roomId: string;
   initialRevision: number;
-  localSocketId: string;
+  localClientId: string;
   onRevision: (revision: number) => void;
   onConflict: (message: string) => void;
   onParticipants: (participants: ParticipantPublic[]) => void;
 }
 
-export function attachCollaboration(options: SyncOptions): () => void {
+export function attachCollaboration(options: SyncOptions): CollaborationHandle {
   const {
     modeler,
     socket,
     roomId,
-    localSocketId,
+    localClientId,
     onRevision,
     onConflict,
     onParticipants,
@@ -31,11 +38,13 @@ export function attachCollaboration(options: SyncOptions): () => void {
   let applyingRemote = false;
   let debounceTimer: number | null = null;
   let destroyed = false;
+  let pendingFlush = false;
 
   const canvas = modeler.get('canvas') as {
     viewbox: (vb?: unknown) => unknown;
     addMarker: (id: string, marker: string) => void;
     removeMarker: (id: string, marker: string) => void;
+    resized?: () => void;
   };
   const eventBus = modeler.get('eventBus') as {
     on: (event: string, priority: number | ((e: unknown) => void), handler?: (e: unknown) => void) => void;
@@ -64,9 +73,9 @@ export function attachCollaboration(options: SyncOptions): () => void {
   const onDiagramState = async (payload: {
     xml: string;
     revision: number;
-    fromSocketId: string;
+    fromClientId: string;
   }) => {
-    if (payload.fromSocketId === localSocketId || destroyed) {
+    if (payload.fromClientId === localClientId || destroyed) {
       return;
     }
     await applyRemoteXml(payload.xml, payload.revision);
@@ -98,6 +107,11 @@ export function attachCollaboration(options: SyncOptions): () => void {
       return;
     }
 
+    if (!socket.connected) {
+      pendingFlush = true;
+      return;
+    }
+
     try {
       const { xml } = await modeler.saveXML({ format: true });
       if (!xml) {
@@ -105,6 +119,7 @@ export function attachCollaboration(options: SyncOptions): () => void {
       }
 
       const baseRevision = revision;
+      pendingFlush = false;
       socket.emit(
         'diagram:update',
         { roomId, baseRevision, xml },
@@ -124,6 +139,7 @@ export function attachCollaboration(options: SyncOptions): () => void {
       );
     } catch (error) {
       console.error('Failed to export diagram', error);
+      pendingFlush = true;
     }
   }
 
@@ -134,12 +150,30 @@ export function attachCollaboration(options: SyncOptions): () => void {
     try {
       await modeler.importXML(xml);
       canvas.viewbox(viewbox);
+      canvas.resized?.();
       revision = nextRevision;
       onRevision(revision);
     } catch (error) {
       console.error('Failed to import remote diagram', error);
     } finally {
       applyingRemote = false;
+    }
+  }
+
+  async function applySnapshot(snapshot: RoomSnapshot): Promise<void> {
+    if (destroyed) {
+      return;
+    }
+    onParticipants(snapshot.participants);
+    paintRemoteSelections(snapshot.participants);
+    if (snapshot.revision !== revision) {
+      await applyRemoteXml(snapshot.xml, snapshot.revision);
+    } else {
+      revision = snapshot.revision;
+      onRevision(revision);
+    }
+    if (pendingFlush) {
+      await pushLocalXml();
     }
   }
 
@@ -166,7 +200,7 @@ export function attachCollaboration(options: SyncOptions): () => void {
     const rules: string[] = [];
 
     for (const participant of participants) {
-      if (participant.id === localSocketId || !participant.selectedElementId) {
+      if (participant.id === localClientId || !participant.selectedElementId) {
         continue;
       }
 
@@ -182,9 +216,8 @@ export function attachCollaboration(options: SyncOptions): () => void {
       }
     }
 
-    // Color is applied via CSS variable on the canvas container for the latest peer.
     const peer = participants.find(
-      (p) => p.id !== localSocketId && p.selectedElementId
+      (p) => p.id !== localClientId && p.selectedElementId
     );
     if (peer) {
       (modeler.get('canvas') as { _container?: HTMLElement })._container
@@ -197,14 +230,19 @@ export function attachCollaboration(options: SyncOptions): () => void {
     styleEl.textContent = rules.join('\n');
   }
 
-  return () => {
-    destroyed = true;
-    if (debounceTimer !== null) {
-      window.clearTimeout(debounceTimer);
-    }
-    eventBus.off('commandStack.changed', onCommandStackChanged);
-    eventBus.off('selection.changed', onSelectionChanged);
-    socket.off('diagram:state', onDiagramState);
-    socket.off('presence:state', onPresenceState);
+  return {
+    dispose: () => {
+      destroyed = true;
+      if (debounceTimer !== null) {
+        window.clearTimeout(debounceTimer);
+      }
+      eventBus.off('commandStack.changed', onCommandStackChanged);
+      eventBus.off('selection.changed', onSelectionChanged);
+      socket.off('diagram:state', onDiagramState);
+      socket.off('presence:state', onPresenceState);
+    },
+    applySnapshot,
+    flush: pushLocalXml,
+    getRevision: () => revision,
   };
 }

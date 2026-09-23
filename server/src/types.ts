@@ -29,12 +29,16 @@ export interface PresenceUpdatePayload {
 
 export type ClientToServerEvents = {
   'room:create': (
-    payload: { name: string },
+    payload: { name: string; clientId: string },
     callback: (result: RoomCreateResult) => void
   ) => void;
   'room:join': (
-    payload: { roomId: string; name: string },
+    payload: { roomId: string; name: string; clientId: string },
     callback: (result: RoomJoinResult) => void
+  ) => void;
+  'room:leave': (
+    payload: { roomId: string; clientId: string },
+    callback?: (result: { ok: boolean }) => void
   ) => void;
   'diagram:update': (
     payload: DiagramUpdatePayload,
@@ -44,7 +48,11 @@ export type ClientToServerEvents = {
 };
 
 export type ServerToClientEvents = {
-  'diagram:state': (payload: { xml: string; revision: number; fromSocketId: string }) => void;
+  'diagram:state': (payload: {
+    xml: string;
+    revision: number;
+    fromClientId: string;
+  }) => void;
   'presence:state': (payload: { participants: ParticipantPublic[] }) => void;
   'room:closed': (payload: { reason: string }) => void;
 };
