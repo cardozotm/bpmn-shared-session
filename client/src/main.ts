@@ -169,7 +169,11 @@ async function openEditor(snapshot: RoomSnapshot): Promise<void> {
 
   try {
     await modeler.importXML(snapshot.xml);
-    const canvas = modeler.get('canvas') as { zoom: (mode: string) => void };
+    const canvas = modeler.get('canvas') as {
+      zoom: (mode: string) => void;
+      resized: () => void;
+    };
+    canvas.resized();
     canvas.zoom('fit-viewport');
   } catch (error) {
     console.error(error);
