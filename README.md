@@ -36,14 +36,13 @@ The Express server serves `client/dist` and Socket.IO on the same origin (port f
 
 ## Deploy (GitHub + Render)
 
-Repo: https://github.com/cardozotm/bpmn-shared-session
+- **Repo:** https://github.com/cardozotm/bpmn-shared-session  
+- **Live app:** https://bpmn-shared-session.onrender.com  
+- **Dashboard:** https://dashboard.render.com/web/srv-daq1p960tbcc73fgi03g  
 
-**One-click Blueprint:** [Deploy to Render](https://dashboard.render.com/blueprint/new?repo=https://github.com/cardozotm/bpmn-shared-session)
+**One-click Blueprint (new environments):** [Deploy to Render](https://dashboard.render.com/blueprint/new?repo=https://github.com/cardozotm/bpmn-shared-session)
 
-1. Open the link above (or in the [Render Dashboard](https://dashboard.render.com), create a new **Blueprint** and select this repository).
-2. Connect GitHub if prompted, then **Deploy Blueprint**.
-3. Render runs `npm install && npm run build`, then `npm start`, with `NODE_ENV=production`.
-4. Open the public URL, hit `/health`, and share a room between two browsers.
+Render runs `npm install --include=dev && npm run build`, then `npm start`, with `NODE_ENV=production`.
 
 On the free tier the service sleeps when idle; in-memory rooms are cleared when the process stops.
 
