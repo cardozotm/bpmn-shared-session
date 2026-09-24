@@ -169,7 +169,7 @@ function renderLobby(initialRoomId = ''): void {
     <main class="lobby">
       <div class="lobby-card">
         <h1>BPMN compartilhado</h1>
-        <p class="subtitle">Dois usuários editam o mesmo diagrama em tempo real. O desenho fica salvo neste navegador.</p>
+        <p class="subtitle">Até 5 usuários editam o mesmo diagrama em tempo real. O desenho fica salvo neste navegador.</p>
         <label class="field">
           <span>Seu nome</span>
           <input id="name-input" type="text" maxlength="32" placeholder="Ex.: Ana" autocomplete="nickname" />

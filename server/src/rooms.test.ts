@@ -42,17 +42,20 @@ describe('RoomStore', () => {
     expect(new Set(colors).size).toBe(2);
   });
 
-  it('rejects a third participant when the room is full', () => {
+  it('rejects a sixth participant when the room is full', () => {
     const store = new RoomStore({ codeGenerator: () => 'FULL01' });
     store.create('client-a', 'socket-1', 'Alice', EMPTY_DIAGRAM_XML);
     store.join('FULL01', 'client-b', 'socket-2', 'Bob');
+    store.join('FULL01', 'client-c', 'socket-3', 'Carol');
+    store.join('FULL01', 'client-d', 'socket-4', 'Dan');
+    store.join('FULL01', 'client-e', 'socket-5', 'Eve');
 
     expect(() =>
-      store.join('FULL01', 'client-c', 'socket-3', 'Carol')
+      store.join('FULL01', 'client-f', 'socket-6', 'Frank')
     ).toThrow(RoomError);
     expect(() =>
-      store.join('FULL01', 'client-c', 'socket-3', 'Carol')
-    ).toThrow(/dois participantes/);
+      store.join('FULL01', 'client-f', 'socket-6', 'Frank')
+    ).toThrow(/5 participantes/);
   });
 
   it('rejoins the same clientId without consuming a second seat', () => {

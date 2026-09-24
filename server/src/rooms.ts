@@ -5,6 +5,9 @@ import {
   type RoomSnapshot,
 } from './types.js';
 
+/** Maximum simultaneous participants in a room. */
+export const MAX_PARTICIPANTS = 5;
+
 /** Keep empty rooms (and their XML) for 24h after the last explicit leave. */
 export const ROOM_IDLE_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -133,8 +136,11 @@ export class RoomStore {
       return this.toSnapshot(room);
     }
 
-    if (room.participants.size >= 2) {
-      throw new RoomError('ROOM_FULL', 'Esta sala já tem dois participantes.');
+    if (room.participants.size >= MAX_PARTICIPANTS) {
+      throw new RoomError(
+        'ROOM_FULL',
+        `Esta sala já tem ${MAX_PARTICIPANTS} participantes.`
+      );
     }
 
     const usedColors = new Set(
@@ -142,7 +148,7 @@ export class RoomStore {
     );
     const color =
       PARTICIPANT_COLORS.find((candidate) => !usedColors.has(candidate)) ??
-      PARTICIPANT_COLORS[1];
+      PARTICIPANT_COLORS[room.participants.size % PARTICIPANT_COLORS.length];
 
     room.participants.set(id, {
       clientId: id,

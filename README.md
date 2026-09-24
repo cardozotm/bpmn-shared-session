@@ -1,6 +1,6 @@
 # Shared BPMN session
 
-Web app where two users join the same room and edit a [bpmn-js](https://bpmn.io/toolkit/bpmn-js/) diagram together in real time.
+Web app where up to five users join the same room and edit a [bpmn-js](https://bpmn.io/toolkit/bpmn-js/) diagram together in real time.
 
 ## Stack
 
@@ -12,7 +12,7 @@ No login and no database. Rooms live in server memory.
 
 ### Resilience
 
-- Each browser gets a stable `clientId` in `localStorage`. Reconnects reuse the same seat (not a third user).
+- Each browser gets a stable `clientId` in `localStorage`. Reconnects reuse the same seat (not an extra user).
 - Transport disconnects keep the seat for **45 seconds** so a refresh or brief network blip can rejoin.
 - After the last participant leaves (or grace expires), the room XML is kept for **24 hours** while the process stays awake.
 - Diagram XML is also persisted in the browser `localStorage` (per room code). Leaving and returning — even after a Render sleep — restores the drawing from local storage and recreates the room on the server when needed.
@@ -29,9 +29,9 @@ npm run dev
 - App: http://localhost:5173  
 - API / Socket.IO: http://localhost:8765  
 
-Open two browser windows (or one normal + one private window). In the first, enter a name and click **Criar sessão**. Copy the link or room code. In the second, enter a name and the code, then **Entrar na sessão**. Draw on either side; the other client updates after a short debounce.
+Open two or more browser windows. In the first, enter a name and click **Criar sessão**. Copy the link or room code. In the others, enter a name and the code, then **Entrar na sessão**. Draw on either side; the other clients update after a short debounce.
 
-A third join attempt for the same room is rejected (room full).
+A sixth join attempt for the same room is rejected (room full, max 5).
 
 ## Production build
 

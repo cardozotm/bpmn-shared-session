@@ -1,4 +1,10 @@
-export const PARTICIPANT_COLORS = ['#2563eb', '#dc2626'] as const;
+export const PARTICIPANT_COLORS = [
+  '#2563eb',
+  '#dc2626',
+  '#16a34a',
+  '#ca8a04',
+  '#9333ea',
+] as const;
 
 export type ParticipantColor = (typeof PARTICIPANT_COLORS)[number];
 
