@@ -263,6 +263,44 @@ button.ghost {
   display: none !important;
 }
 
+.recent-rooms {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.recent-title {
+  margin: 0 0 10px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.recent-rooms ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.recent-room-btn {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  text-align: left;
+}
+
+.recent-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+}
+
+.recent-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 .remote-cursors {
   position: absolute;
   inset: 0;

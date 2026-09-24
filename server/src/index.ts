@@ -73,7 +73,13 @@ io.on('connection', (socket) => {
         payload.roomId,
         payload?.clientId ?? '',
         socket.id,
-        payload?.name ?? ''
+        payload?.name ?? '',
+        payload.restoreXml
+          ? {
+              xml: payload.restoreXml,
+              revision: payload.restoreRevision ?? 0,
+            }
+          : null
       );
       currentRoomId = snapshot.roomId;
       currentClientId = payload.clientId;
@@ -122,6 +128,28 @@ io.on('connection', (socket) => {
         revision: result.revision,
         fromClientId: result.clientId,
       });
+    }
+
+    callback(result);
+  });
+
+  socket.on('diagram:restore', (payload, callback) => {
+    const result = rooms.restoreDiagram(
+      payload.roomId,
+      socket.id,
+      payload.xml,
+      payload.revision
+    );
+
+    if (result.ok && result.clientId) {
+      const snapshot = rooms.getSnapshot(payload.roomId);
+      if (snapshot) {
+        socket.to(payload.roomId).emit('diagram:state', {
+          xml: snapshot.xml,
+          revision: snapshot.revision,
+          fromClientId: result.clientId,
+        });
+      }
     }
 
     callback(result);

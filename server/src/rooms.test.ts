@@ -144,6 +144,35 @@ describe('RoomStore', () => {
     expect(store.getSnapshot('GRACE1')?.participants).toHaveLength(1);
   });
 
+  it('restores a missing room from local XML with the same code', () => {
+    const store = new RoomStore({ codeGenerator: () => 'NEWID1' });
+    const snapshot = store.join(
+      'OLDCODE',
+      'client-a',
+      'socket-1',
+      'Alice',
+      { xml: '<xml>from-local</xml>', revision: 4 }
+    );
+
+    expect(snapshot.roomId).toBe('OLDCODE');
+    expect(snapshot.xml).toBe('<xml>from-local</xml>');
+    expect(snapshot.revision).toBe(4);
+  });
+
+  it('applies a newer local diagram via restoreDiagram', () => {
+    const store = new RoomStore({ codeGenerator: () => 'REST01' });
+    store.create('client-a', 'socket-1', 'Alice', EMPTY_DIAGRAM_XML);
+
+    const result = store.restoreDiagram(
+      'REST01',
+      'socket-1',
+      '<xml>newer</xml>',
+      3
+    );
+    expect(result).toMatchObject({ ok: true, revision: 3 });
+    expect(store.getSnapshot('REST01')?.xml).toBe('<xml>newer</xml>');
+  });
+
   it('preserves room XML after explicit leave until idle TTL', () => {
     vi.useFakeTimers();
     const store = new RoomStore({

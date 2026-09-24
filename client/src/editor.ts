@@ -1,5 +1,6 @@
 import type BpmnModeler from 'bpmn-js/lib/Modeler';
 import type { AppSocket } from './socket';
+import { saveRoomDiagram } from './storage';
 import type { CursorStatePayload, ParticipantPublic, RoomSnapshot } from './types';
 
 const DEBOUNCE_MS = 250;
@@ -297,6 +298,7 @@ export function attachCollaboration(options: SyncOptions): CollaborationHandle {
           if (result.ok) {
             revision = result.revision;
             onRevision(revision);
+            saveRoomDiagram(roomId, xml, revision);
             return;
           }
 
@@ -320,6 +322,7 @@ export function attachCollaboration(options: SyncOptions): CollaborationHandle {
       canvas.resized?.();
       revision = nextRevision;
       onRevision(revision);
+      saveRoomDiagram(roomId, xml, revision);
       repositionRemoteCursors();
     } catch (error) {
       console.error('Failed to import remote diagram', error);

@@ -9,10 +9,15 @@ import {
   createSocket,
   emitWithAck,
   getOrCreateClientId,
+  listSavedRooms,
   loadActiveSession,
+  loadRoomDiagram,
   saveActiveSession,
+  saveRoomDiagram,
+  touchSavedRoomName,
 } from './socket';
 import type {
+  DiagramUpdateResult,
   ParticipantPublic,
   RoomCreateResult,
   RoomJoinResult,
@@ -43,6 +48,61 @@ socket.on('connect', () => {
 
 renderLobby(prefilledRoom);
 
+async function joinRoom(roomId: string, name: string): Promise<RoomJoinResult> {
+  const local = loadRoomDiagram(roomId);
+  return emitWithAck<RoomJoinResult>((cb) =>
+    socket.emit(
+      'room:join',
+      {
+        roomId,
+        name,
+        clientId,
+        restoreXml: local?.xml,
+        restoreRevision: local?.revision,
+      },
+      cb
+    )
+  );
+}
+
+async function reconcileWithLocalStorage(
+  snapshot: RoomSnapshot,
+  name: string
+): Promise<RoomSnapshot> {
+  const local = loadRoomDiagram(snapshot.roomId);
+  touchSavedRoomName(snapshot.roomId, name);
+
+  if (!local) {
+    saveRoomDiagram(snapshot.roomId, snapshot.xml, snapshot.revision, name);
+    return snapshot;
+  }
+
+  if (local.revision > snapshot.revision) {
+    const restored = await emitWithAck<DiagramUpdateResult>((cb) =>
+      socket.emit(
+        'diagram:restore',
+        {
+          roomId: snapshot.roomId,
+          xml: local.xml,
+          revision: local.revision,
+        },
+        cb
+      )
+    );
+    if (restored.ok) {
+      saveRoomDiagram(snapshot.roomId, local.xml, restored.revision, name);
+      return {
+        ...snapshot,
+        xml: local.xml,
+        revision: restored.revision,
+      };
+    }
+  }
+
+  saveRoomDiagram(snapshot.roomId, snapshot.xml, snapshot.revision, name);
+  return snapshot;
+}
+
 async function handleSocketConnected(): Promise<void> {
   if (!inEditor || !activeRoomId || !activeName || rejoining) {
     return;
@@ -50,13 +110,7 @@ async function handleSocketConnected(): Promise<void> {
 
   rejoining = true;
   try {
-    const result = await emitWithAck<RoomJoinResult>((cb) =>
-      socket.emit(
-        'room:join',
-        { roomId: activeRoomId!, name: activeName!, clientId },
-        cb
-      )
-    );
+    const result = await joinRoom(activeRoomId, activeName);
     if (!result.ok) {
       showEditorBanner(result.error);
       clearActiveSession();
@@ -69,7 +123,8 @@ async function handleSocketConnected(): Promise<void> {
       return;
     }
 
-    await collaboration?.applySnapshot(result.snapshot);
+    const reconciled = await reconcileWithLocalStorage(result.snapshot, activeName);
+    await collaboration?.applySnapshot(reconciled);
     await collaboration?.flush();
   } catch (error) {
     showEditorBanner(
@@ -86,11 +141,35 @@ function renderLobby(initialRoomId = ''): void {
   activeRoomId = null;
   activeName = null;
 
+  const savedRooms = listSavedRooms().slice(0, 5);
+  const recentHtml =
+    savedRooms.length === 0
+      ? ''
+      : `
+      <div class="recent-rooms">
+        <p class="recent-title">Salas salvas neste navegador</p>
+        <ul>
+          ${savedRooms
+            .map(
+              (room) => `
+            <li>
+              <button type="button" class="recent-room-btn" data-room="${escapeAttr(room.roomId)}">
+                <span class="recent-code">${escapeHtml(room.roomId)}</span>
+                <span class="recent-meta">rev ${room.revision}</span>
+              </button>
+            </li>
+          `
+            )
+            .join('')}
+        </ul>
+      </div>
+    `;
+
   app!.innerHTML = `
     <main class="lobby">
       <div class="lobby-card">
         <h1>BPMN compartilhado</h1>
-        <p class="subtitle">Dois usuários editam o mesmo diagrama em tempo real.</p>
+        <p class="subtitle">Dois usuários editam o mesmo diagrama em tempo real. O desenho fica salvo neste navegador.</p>
         <label class="field">
           <span>Seu nome</span>
           <input id="name-input" type="text" maxlength="32" placeholder="Ex.: Ana" autocomplete="nickname" />
@@ -106,6 +185,7 @@ function renderLobby(initialRoomId = ''): void {
         <div class="actions">
           <button id="join-btn" type="button">Entrar na sessão</button>
         </div>
+        ${recentHtml}
         <p id="lobby-error" class="error" hidden></p>
         <p id="lobby-status" class="status">Conectando…</p>
       </div>
@@ -156,10 +236,9 @@ function renderLobby(initialRoomId = ''): void {
     }
   });
 
-  joinBtn.addEventListener('click', async () => {
+  const doJoin = async (roomId: string) => {
     errorEl.hidden = true;
     const name = nameInput.value.trim();
-    const roomId = roomInput.value.trim().toUpperCase();
     localStorage.setItem('bpmn-display-name', name);
     if (!roomId) {
       showError('Informe o código da sala.');
@@ -167,9 +246,7 @@ function renderLobby(initialRoomId = ''): void {
     }
     setBusy(true);
     try {
-      const result = await emitWithAck<RoomJoinResult>((cb) =>
-        socket.emit('room:join', { roomId, name, clientId }, cb)
-      );
+      const result = await joinRoom(roomId, name);
       if (!result.ok) {
         showError(result.error);
         return;
@@ -180,7 +257,19 @@ function renderLobby(initialRoomId = ''): void {
     } finally {
       setBusy(false);
     }
+  };
+
+  joinBtn.addEventListener('click', () => {
+    void doJoin(roomInput.value.trim().toUpperCase());
   });
+
+  for (const btn of document.querySelectorAll<HTMLButtonElement>('.recent-room-btn')) {
+    btn.addEventListener('click', () => {
+      const roomId = btn.dataset.room ?? '';
+      roomInput.value = roomId;
+      void doJoin(roomId);
+    });
+  }
 
   function showError(message: string): void {
     errorEl.textContent = message;
@@ -190,36 +279,21 @@ function renderLobby(initialRoomId = ''): void {
   function setBusy(busy: boolean): void {
     createBtn.disabled = busy;
     joinBtn.disabled = busy;
+    for (const btn of document.querySelectorAll<HTMLButtonElement>('.recent-room-btn')) {
+      btn.disabled = busy;
+    }
   }
 
-  // Resume session after refresh if we still have sessionStorage + room in URL.
   const pending = loadActiveSession();
-  if (pending && initialRoomId && pending.roomId === initialRoomId) {
+  const resumeRoom =
+    initialRoomId ||
+    (pending && !initialRoomId ? pending.roomId : '') ||
+    '';
+  if (pending && resumeRoom && pending.roomId === resumeRoom) {
     nameInput.value = pending.name || nameInput.value;
-    void (async () => {
-      setBusy(true);
-      try {
-        const result = await emitWithAck<RoomJoinResult>((cb) =>
-          socket.emit(
-            'room:join',
-            { roomId: pending.roomId, name: pending.name, clientId },
-            cb
-          )
-        );
-        if (!result.ok) {
-          clearActiveSession();
-          showError(result.error);
-          return;
-        }
-        await openEditor(result.snapshot, pending.name);
-      } catch (error) {
-        showError(
-          error instanceof Error ? error.message : 'Falha ao retomar a sessão.'
-        );
-      } finally {
-        setBusy(false);
-      }
-    })();
+    void doJoin(pending.roomId);
+  } else if (initialRoomId && loadRoomDiagram(initialRoomId)) {
+    void doJoin(initialRoomId);
   }
 }
 
@@ -230,8 +304,10 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
   activeName = name;
   saveActiveSession(snapshot.roomId, name);
 
+  const reconciled = await reconcileWithLocalStorage(snapshot, name);
+
   const url = new URL(window.location.href);
-  url.searchParams.set('room', snapshot.roomId);
+  url.searchParams.set('room', reconciled.roomId);
   window.history.replaceState({}, '', url);
 
   app!.innerHTML = `
@@ -239,13 +315,13 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
       <header class="toolbar">
         <div class="toolbar-left">
           <strong class="brand">BPMN compartilhado</strong>
-          <span class="room-code" title="Código da sala">${escapeHtml(snapshot.roomId)}</span>
+          <span class="room-code" title="Código da sala">${escapeHtml(reconciled.roomId)}</span>
           <button id="copy-link-btn" type="button" class="ghost">Copiar link</button>
         </div>
         <div id="participants" class="participants"></div>
         <div class="toolbar-right">
           <span id="conn-status" class="pill">Online</span>
-          <span id="revision" class="pill muted">rev ${snapshot.revision}</span>
+          <span id="revision" class="pill muted">rev ${reconciled.revision}</span>
           <button id="download-btn" type="button">Baixar .bpmn</button>
           <button id="leave-btn" type="button" class="ghost">Sair</button>
         </div>
@@ -268,7 +344,7 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
   (window as unknown as { __bpmnModeler?: BpmnModeler }).__bpmnModeler = modeler;
 
   try {
-    await modeler.importXML(snapshot.xml);
+    await modeler.importXML(reconciled.xml);
     const canvas = modeler.get('canvas') as {
       zoom: (mode: string) => void;
       resized: () => void;
@@ -280,13 +356,13 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
     showBanner('Não foi possível carregar o diagrama inicial.');
   }
 
-  renderParticipants(participantsEl, snapshot.participants, clientId);
+  renderParticipants(participantsEl, reconciled.participants, clientId);
 
   collaboration = attachCollaboration({
     modeler,
     socket,
-    roomId: snapshot.roomId,
-    initialRevision: snapshot.revision,
+    roomId: reconciled.roomId,
+    initialRevision: reconciled.revision,
     localClientId: clientId,
     onRevision: (revision) => {
       revisionEl.textContent = `rev ${revision}`;
@@ -331,7 +407,7 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
       const href = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = href;
-      anchor.download = `diagrama-${snapshot.roomId}.bpmn`;
+      anchor.download = `diagrama-${reconciled.roomId}.bpmn`;
       anchor.click();
       URL.revokeObjectURL(href);
     } catch (error) {
@@ -340,9 +416,22 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
     }
   });
 
-  leaveBtn.addEventListener('click', () => {
+  leaveBtn.addEventListener('click', async () => {
     const roomId = activeRoomId;
-    if (roomId) {
+    if (modeler && roomId) {
+      try {
+        const { xml } = await modeler.saveXML({ format: true });
+        if (xml) {
+          saveRoomDiagram(
+            roomId,
+            xml,
+            collaboration?.getRevision() ?? 0,
+            activeName ?? undefined
+          );
+        }
+      } catch {
+        // ignore save errors on leave
+      }
       socket.emit('room:leave', { roomId, clientId });
     }
     clearActiveSession();

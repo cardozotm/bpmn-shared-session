@@ -14,9 +14,10 @@ No login and no database. Rooms live in server memory.
 
 - Each browser gets a stable `clientId` in `localStorage`. Reconnects reuse the same seat (not a third user).
 - Transport disconnects keep the seat for **45 seconds** so a refresh or brief network blip can rejoin.
-- After the last participant leaves (or grace expires), the room XML is kept for **24 hours** while the process stays awake — leave and come back with the same room code to restore the diagram.
-- Active session (`roomId` + name) is stored in `sessionStorage` so a refresh auto-rejoins.
-- **Limit:** Render free-tier sleep/redeploy clears in-memory rooms.
+- After the last participant leaves (or grace expires), the room XML is kept for **24 hours** while the process stays awake.
+- Diagram XML is also persisted in the browser `localStorage` (per room code). Leaving and returning — even after a Render sleep — restores the drawing from local storage and recreates the room on the server when needed.
+- Active session and a short list of recent rooms are kept in `localStorage`.
+- **Limit:** local persistence is per browser/device; another device only sees what the live server still has.
 
 ## Quick start (local)
 

@@ -96,15 +96,30 @@ export class RoomStore {
     roomId: string,
     clientId: string,
     socketId: string,
-    name: string
+    name: string,
+    restore?: { xml: string; revision: number } | null
   ): RoomSnapshot {
     const id = sanitizeClientId(clientId);
     if (!id) {
       throw new RoomError('INVALID_CLIENT', 'clientId inválido.');
     }
 
-    const room = this.rooms.get(normalizeRoomId(roomId));
+    let room = this.rooms.get(normalizeRoomId(roomId));
     if (!room) {
+      if (
+        restore &&
+        typeof restore.xml === 'string' &&
+        restore.xml.trim().length > 0
+      ) {
+        return this.createWithId(
+          normalizeRoomId(roomId),
+          id,
+          socketId,
+          name,
+          restore.xml,
+          Math.max(0, Math.floor(restore.revision) || 0)
+        );
+      }
       throw new RoomError('ROOM_NOT_FOUND', 'Sala não encontrada.');
     }
 
@@ -139,6 +154,93 @@ export class RoomStore {
     });
 
     return this.toSnapshot(room);
+  }
+
+  createWithId(
+    roomId: string,
+    clientId: string,
+    socketId: string,
+    name: string,
+    xml: string,
+    revision: number
+  ): RoomSnapshot {
+    const code = normalizeRoomId(roomId);
+    if (!/^[A-Z0-9]{4,8}$/.test(code)) {
+      throw new RoomError('ROOM_NOT_FOUND', 'Código de sala inválido.');
+    }
+    if (this.rooms.has(code)) {
+      return this.join(code, clientId, socketId, name);
+    }
+
+    const participant: Participant = {
+      clientId,
+      socketId,
+      name: sanitizeName(name),
+      color: PARTICIPANT_COLORS[0],
+      selectedElementId: null,
+      disconnectTimer: null,
+    };
+
+    const room: Room = {
+      id: code,
+      xml,
+      revision,
+      participants: new Map([[clientId, participant]]),
+      idleTimer: null,
+    };
+    this.rooms.set(code, room);
+    return this.toSnapshot(room);
+  }
+
+  /**
+   * Apply a locally persisted diagram when it is newer than the server copy.
+   */
+  restoreDiagram(
+    roomId: string,
+    socketId: string,
+    xml: string,
+    revision: number
+  ): DiagramUpdateResult & { clientId?: string } {
+    const room = this.rooms.get(normalizeRoomId(roomId));
+    if (!room) {
+      return {
+        ok: false,
+        error: 'Sala não encontrada.',
+        xml: '',
+        revision: 0,
+      };
+    }
+
+    const participant = [...room.participants.values()].find(
+      (p) => p.socketId === socketId
+    );
+    if (!participant) {
+      return {
+        ok: false,
+        error: 'Você não está nesta sala.',
+        xml: room.xml,
+        revision: room.revision,
+      };
+    }
+
+    if (typeof xml !== 'string' || xml.trim().length === 0) {
+      return {
+        ok: false,
+        error: 'XML inválido.',
+        xml: room.xml,
+        revision: room.revision,
+      };
+    }
+
+    const nextRevision = Math.max(room.revision, Math.floor(revision) || 0);
+    if (nextRevision <= room.revision && xml === room.xml) {
+      return { ok: true, revision: room.revision, clientId: participant.clientId };
+    }
+
+    room.xml = xml;
+    room.revision = nextRevision > room.revision ? nextRevision : room.revision + 1;
+
+    return { ok: true, revision: room.revision, clientId: participant.clientId };
   }
 
   /**

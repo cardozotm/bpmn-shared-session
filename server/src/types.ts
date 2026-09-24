@@ -41,13 +41,25 @@ export interface CursorStatePayload {
   y: number;
 }
 
+export interface DiagramRestorePayload {
+  roomId: string;
+  xml: string;
+  revision: number;
+}
+
 export type ClientToServerEvents = {
   'room:create': (
     payload: { name: string; clientId: string },
     callback: (result: RoomCreateResult) => void
   ) => void;
   'room:join': (
-    payload: { roomId: string; name: string; clientId: string },
+    payload: {
+      roomId: string;
+      name: string;
+      clientId: string;
+      restoreXml?: string;
+      restoreRevision?: number;
+    },
     callback: (result: RoomJoinResult) => void
   ) => void;
   'room:leave': (
@@ -56,6 +68,10 @@ export type ClientToServerEvents = {
   ) => void;
   'diagram:update': (
     payload: DiagramUpdatePayload,
+    callback: (result: DiagramUpdateResult) => void
+  ) => void;
+  'diagram:restore': (
+    payload: DiagramRestorePayload,
     callback: (result: DiagramUpdateResult) => void
   ) => void;
   'presence:update': (payload: PresenceUpdatePayload) => void;
