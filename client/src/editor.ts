@@ -19,6 +19,7 @@ interface Viewbox {
 export interface CollaborationHandle {
   dispose: () => void;
   applySnapshot: (snapshot: RoomSnapshot) => Promise<void>;
+  loadImportedDiagram: (xml: string, revision: number) => Promise<void>;
   flush: () => Promise<void>;
   getRevision: () => number;
 }
@@ -348,6 +349,22 @@ export function attachCollaboration(options: SyncOptions): CollaborationHandle {
     }
   }
 
+  async function loadImportedDiagram(
+    xml: string,
+    nextRevision: number
+  ): Promise<void> {
+    if (destroyed) {
+      return;
+    }
+    await applyRemoteXml(xml, nextRevision);
+    const canvasApi = modeler.get('canvas') as {
+      zoom: (mode: string) => void;
+      resized?: () => void;
+    };
+    canvasApi.resized?.();
+    canvasApi.zoom('fit-viewport');
+  }
+
   const paintedMarkers = new Map<string, string>();
 
   function paintRemoteSelections(participants: ParticipantPublic[]): void {
@@ -423,6 +440,7 @@ export function attachCollaboration(options: SyncOptions): CollaborationHandle {
       cursorLayer.remove();
     },
     applySnapshot,
+    loadImportedDiagram,
     flush: pushLocalXml,
     getRevision: () => revision,
   };

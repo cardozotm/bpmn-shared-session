@@ -322,8 +322,10 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
         <div class="toolbar-right">
           <span id="conn-status" class="pill">Online</span>
           <span id="revision" class="pill muted">rev ${reconciled.revision}</span>
+          <button id="import-btn" type="button">Importar .bpmn</button>
           <button id="download-btn" type="button">Baixar .bpmn</button>
           <button id="leave-btn" type="button" class="ghost">Sair</button>
+          <input id="import-input" type="file" accept=".bpmn,.xml,application/xml,text/xml" hidden />
         </div>
       </header>
       <p id="banner" class="banner" hidden></p>
@@ -337,6 +339,8 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
   const connStatusEl = document.querySelector<HTMLSpanElement>('#conn-status')!;
   const bannerEl = document.querySelector<HTMLParagraphElement>('#banner')!;
   const copyLinkBtn = document.querySelector<HTMLButtonElement>('#copy-link-btn')!;
+  const importBtn = document.querySelector<HTMLButtonElement>('#import-btn')!;
+  const importInput = document.querySelector<HTMLInputElement>('#import-input')!;
   const downloadBtn = document.querySelector<HTMLButtonElement>('#download-btn')!;
   const leaveBtn = document.querySelector<HTMLButtonElement>('#leave-btn')!;
 
@@ -394,6 +398,19 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
     }
   });
 
+  importBtn.addEventListener('click', () => {
+    importInput.value = '';
+    importInput.click();
+  });
+
+  importInput.addEventListener('change', () => {
+    const file = importInput.files?.[0];
+    if (!file) {
+      return;
+    }
+    void importBpmnFile(file);
+  });
+
   downloadBtn.addEventListener('click', async () => {
     if (!modeler) {
       return;
@@ -443,6 +460,77 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
     window.history.replaceState({}, '', cleanUrl);
     renderLobby();
   });
+
+  async function importBpmnFile(file: File): Promise<void> {
+    if (!modeler || !activeRoomId) {
+      return;
+    }
+
+    const lower = file.name.toLowerCase();
+    if (!lower.endsWith('.bpmn') && !lower.endsWith('.xml')) {
+      showBanner('Selecione um arquivo .bpmn ou .xml.');
+      return;
+    }
+
+    let xml: string;
+    try {
+      xml = await file.text();
+    } catch {
+      showBanner('Não foi possível ler o arquivo.');
+      return;
+    }
+
+    if (!xml.trim() || !xml.includes('definitions')) {
+      showBanner('Arquivo BPMN inválido.');
+      return;
+    }
+
+    try {
+      await modeler.importXML(xml);
+    } catch (error) {
+      console.error(error);
+      showBanner('Falha ao importar o diagrama BPMN.');
+      return;
+    }
+
+    const suggestedRevision = (collaboration?.getRevision() ?? 0) + 1;
+    try {
+      const restored = await emitWithAck<DiagramUpdateResult>((cb) =>
+        socket.emit(
+          'diagram:restore',
+          {
+            roomId: activeRoomId!,
+            xml,
+            revision: suggestedRevision,
+          },
+          cb
+        )
+      );
+
+      if (!restored.ok) {
+        showBanner(restored.error || 'Falha ao sincronizar o diagrama importado.');
+        return;
+      }
+
+      saveRoomDiagram(
+        activeRoomId,
+        xml,
+        restored.revision,
+        activeName ?? undefined
+      );
+
+      await collaboration?.loadImportedDiagram(xml, restored.revision);
+      revisionEl.textContent = `rev ${restored.revision}`;
+      showBanner(`Diagrama importado: ${file.name}`);
+    } catch (error) {
+      console.error(error);
+      showBanner(
+        error instanceof Error
+          ? error.message
+          : 'Falha ao sincronizar o diagrama importado.'
+      );
+    }
+  }
 
   function showBanner(message: string): void {
     bannerEl.textContent = message;
