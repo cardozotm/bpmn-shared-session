@@ -27,6 +27,20 @@ export interface PresenceUpdatePayload {
   selectedElementId: string | null;
 }
 
+export interface CursorUpdatePayload {
+  roomId: string;
+  x: number;
+  y: number;
+}
+
+export interface CursorStatePayload {
+  clientId: string;
+  name: string;
+  color: ParticipantColor;
+  x: number;
+  y: number;
+}
+
 export type RoomCreateResult =
   | { ok: true; snapshot: RoomSnapshot }
   | { ok: false; error: string };
@@ -57,6 +71,7 @@ export type ClientToServerEvents = {
     callback: (result: DiagramUpdateResult) => void
   ) => void;
   'presence:update': (payload: PresenceUpdatePayload) => void;
+  'cursor:update': (payload: CursorUpdatePayload) => void;
 };
 
 export type ServerToClientEvents = {
@@ -66,6 +81,7 @@ export type ServerToClientEvents = {
     fromClientId: string;
   }) => void;
   'presence:state': (payload: { participants: ParticipantPublic[] }) => void;
+  'cursor:state': (payload: CursorStatePayload) => void;
   'room:closed': (payload: { reason: string }) => void;
 };
 

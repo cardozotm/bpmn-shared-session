@@ -285,6 +285,20 @@ export class RoomStore {
     return this.findBySocket(socketId)?.participant.clientId ?? null;
   }
 
+  getParticipantBySocket(socketId: string): ParticipantPublic | null {
+    const found = this.findBySocket(socketId);
+    if (!found) {
+      return null;
+    }
+    const { participant } = found;
+    return {
+      id: participant.clientId,
+      name: participant.name,
+      color: participant.color,
+      selectedElementId: participant.selectedElementId,
+    };
+  }
+
   forceDelete(roomId: string): void {
     const room = this.rooms.get(normalizeRoomId(roomId));
     if (!room) {

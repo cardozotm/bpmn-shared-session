@@ -139,6 +139,28 @@ io.on('connection', (socket) => {
     io.to(payload.roomId).emit('presence:state', { participants });
   });
 
+  socket.on('cursor:update', (payload) => {
+    const participant = rooms.getParticipantBySocket(socket.id);
+    if (!participant) {
+      return;
+    }
+    if (
+      typeof payload.x !== 'number' ||
+      typeof payload.y !== 'number' ||
+      !Number.isFinite(payload.x) ||
+      !Number.isFinite(payload.y)
+    ) {
+      return;
+    }
+    socket.to(payload.roomId).emit('cursor:state', {
+      clientId: participant.id,
+      name: participant.name,
+      color: participant.color,
+      x: payload.x,
+      y: payload.y,
+    });
+  });
+
   socket.on('disconnect', () => {
     if (!currentRoomId) {
       return;
