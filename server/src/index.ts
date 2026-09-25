@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
+import { registerAgentRoutes } from './agent-routes.js';
 import { createRoomPersistence } from './persistence.js';
 import {
   allocateRoomCode,
@@ -27,8 +28,16 @@ const isProduction = process.env.NODE_ENV === 'production';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientDist = path.resolve(__dirname, '../../client/dist');
 
+// Load server/.env in local development when present (Node 20.6+).
+try {
+  process.loadEnvFile?.(path.resolve(__dirname, '../.env'));
+} catch {
+  // optional
+}
+
 const app = express();
 app.use(cors());
+app.use(express.json({ limit: '2mb' }));
 app.get('/health', (_req, res) => {
   res.json({ ok: true });
 });
@@ -61,6 +70,8 @@ async function persistRoom(roomId: string): Promise<void> {
     legend: snapshot.legend,
   });
 }
+
+registerAgentRoutes(app, rooms, persistence, io, persistRoom);
 
 async function allocateUniqueCode(): Promise<string> {
   for (let attempt = 0; attempt < 24; attempt += 1) {
@@ -178,7 +189,8 @@ io.on('connection', (socket) => {
         }
         callback({
           ok: false,
-          error: error instanceof Error ? error.message : 'Falha ao entrar na sala.',
+          error:
+            error instanceof Error ? error.message : 'Falha ao entrar na sala.',
         });
       }
     })();
@@ -348,7 +360,11 @@ io.on('connection', (socket) => {
 if (isProduction && existsSync(clientDist)) {
   app.use(express.static(clientDist));
   app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/socket.io') || req.path === '/health') {
+    if (
+      req.path.startsWith('/socket.io') ||
+      req.path === '/health' ||
+      req.path.startsWith('/agent')
+    ) {
       next();
       return;
     }

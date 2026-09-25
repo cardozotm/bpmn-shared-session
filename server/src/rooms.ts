@@ -363,6 +363,39 @@ export class RoomStore {
     return this.removeParticipant(found.room, found.participant.clientId);
   }
 
+  /**
+   * Load a room into memory without consuming a participant seat (agent / hydrate).
+   */
+  hydrateRoom(
+    roomId: string,
+    xml: string,
+    revision: number,
+    legend?: LegendEntry[] | null
+  ): RoomSnapshot {
+    const code = normalizeRoomId(roomId);
+    if (!/^[A-Z0-9]{4,8}$/.test(code)) {
+      throw new RoomError('ROOM_NOT_FOUND', 'Código de sala inválido.');
+    }
+    const existing = this.rooms.get(code);
+    if (existing) {
+      return this.toSnapshot(existing);
+    }
+    if (typeof xml !== 'string' || xml.trim().length === 0) {
+      throw new RoomError('ROOM_NOT_FOUND', 'XML inválido para hidratar sala.');
+    }
+    const room: Room = {
+      id: code,
+      xml,
+      revision: Math.max(0, Math.floor(revision) || 0),
+      legend: sanitizeLegend(legend),
+      participants: new Map(),
+      idleTimer: null,
+    };
+    this.rooms.set(code, room);
+    this.scheduleIdleCleanup(room);
+    return this.toSnapshot(room);
+  }
+
   applyDiagramUpdate(
     roomId: string,
     socketId: string,
@@ -413,6 +446,52 @@ export class RoomStore {
     room.revision += 1;
 
     return { ok: true, revision: room.revision, clientId: participant.clientId };
+  }
+
+  /**
+   * Apply a diagram mutation from the MCP agent without a socket participant.
+   */
+  applyAgentDiagramUpdate(
+    roomId: string,
+    baseRevision: number,
+    xml: string
+  ): DiagramUpdateResult {
+    const room = this.rooms.get(normalizeRoomId(roomId));
+    if (!room) {
+      return {
+        ok: false,
+        error: 'Sala não encontrada.',
+        xml: '',
+        revision: 0,
+      };
+    }
+
+    if (baseRevision !== room.revision) {
+      return {
+        ok: false,
+        error: 'Diagrama atualizado por outro participante.',
+        xml: room.xml,
+        revision: room.revision,
+      };
+    }
+
+    if (typeof xml !== 'string' || xml.trim().length === 0) {
+      return {
+        ok: false,
+        error: 'XML inválido.',
+        xml: room.xml,
+        revision: room.revision,
+      };
+    }
+
+    room.xml = xml;
+    room.revision += 1;
+    this.clearIdleTimer(room);
+    if (room.participants.size === 0) {
+      this.scheduleIdleCleanup(room);
+    }
+
+    return { ok: true, revision: room.revision };
   }
 
   updatePresence(

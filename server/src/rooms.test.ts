@@ -221,6 +221,26 @@ describe('RoomStore', () => {
     expect(updated?.legend).toEqual([{ fill: '#fff', label: 'Custom' }]);
     expect(store.getSnapshot('LEG002')?.legend[0]?.label).toBe('Custom');
   });
+
+  it('hydrates and applies agent updates without a participant seat', () => {
+    const store = new RoomStore();
+    store.hydrateRoom('AGT001', EMPTY_DIAGRAM_XML, 3);
+    expect(store.getSnapshot('AGT001')?.participants).toEqual([]);
+    expect(store.getSnapshot('AGT001')?.revision).toBe(3);
+
+    const ok = store.applyAgentDiagramUpdate('AGT001', 3, '<xml>agent</xml>');
+    expect(ok.ok).toBe(true);
+    expect(ok.revision).toBe(4);
+    expect(store.getSnapshot('AGT001')?.xml).toBe('<xml>agent</xml>');
+
+    const conflict = store.applyAgentDiagramUpdate(
+      'AGT001',
+      3,
+      '<xml>stale</xml>'
+    );
+    expect(conflict.ok).toBe(false);
+    expect(conflict.revision).toBe(4);
+  });
 });
 
 describe('sanitizeName', () => {

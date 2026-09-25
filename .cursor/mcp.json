@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "bpmn-shared-session": {
+      "command": "npx",
+      "args": ["tsx", "mcp/src/index.ts"],
+      "env": {
+        "BPMN_SERVER_URL": "https://bpmn-shared-session.onrender.com",
+        "BPMN_AGENT_TOKEN": "dev-agent-token",
+        "BPMN_ROOM_ID": "J9E9XB"
+      }
+    }
+  }
+}
