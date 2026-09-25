@@ -1,9 +1,13 @@
 import {
+  DEFAULT_LEGEND,
   PARTICIPANT_COLORS,
   type DiagramUpdateResult,
+  type LegendEntry,
   type ParticipantPublic,
   type RoomSnapshot,
 } from './types.js';
+
+export { DEFAULT_LEGEND };
 
 /** Maximum simultaneous participants in a room. */
 export const MAX_PARTICIPANTS = 5;
@@ -27,6 +31,7 @@ export interface Room {
   id: string;
   xml: string;
   revision: number;
+  legend: LegendEntry[];
   /** Keyed by clientId */
   participants: Map<string, Participant>;
   idleTimer: ReturnType<typeof setTimeout> | null;
@@ -46,6 +51,22 @@ function defaultCode(): string {
     code += alphabet[Math.floor(Math.random() * alphabet.length)];
   }
   return code;
+}
+
+export function sanitizeLegend(legend: LegendEntry[] | null | undefined): LegendEntry[] {
+  if (!Array.isArray(legend) || legend.length === 0) {
+    return DEFAULT_LEGEND.map((entry) => ({ ...entry }));
+  }
+  return legend.slice(0, 12).map((entry) => ({
+    fill: String(entry.fill ?? '').slice(0, 32) || '#f1f5f9',
+    stroke:
+      typeof entry.stroke === 'string' ? entry.stroke.slice(0, 32) : undefined,
+    label: String(entry.label ?? '').trim().slice(0, 64) || 'Sem rótulo',
+  }));
+}
+
+export function allocateRoomCode(generator: () => string = defaultCode): string {
+  return generator();
 }
 
 export class RoomStore {
@@ -87,6 +108,7 @@ export class RoomStore {
       id: roomId,
       xml: initialXml,
       revision: 0,
+      legend: sanitizeLegend(DEFAULT_LEGEND),
       participants: new Map([[id, participant]]),
       idleTimer: null,
     };
@@ -95,12 +117,20 @@ export class RoomStore {
     return this.toSnapshot(room);
   }
 
+  has(roomId: string): boolean {
+    return this.rooms.has(normalizeRoomId(roomId));
+  }
+
   join(
     roomId: string,
     clientId: string,
     socketId: string,
     name: string,
-    restore?: { xml: string; revision: number } | null
+    restore?: {
+      xml: string;
+      revision: number;
+      legend?: LegendEntry[];
+    } | null
   ): RoomSnapshot {
     const id = sanitizeClientId(clientId);
     if (!id) {
@@ -120,7 +150,8 @@ export class RoomStore {
           socketId,
           name,
           restore.xml,
-          Math.max(0, Math.floor(restore.revision) || 0)
+          Math.max(0, Math.floor(restore.revision) || 0),
+          restore.legend
         );
       }
       throw new RoomError('ROOM_NOT_FOUND', 'Sala não encontrada.');
@@ -168,18 +199,23 @@ export class RoomStore {
     socketId: string,
     name: string,
     xml: string,
-    revision: number
+    revision: number,
+    legend?: LegendEntry[] | null
   ): RoomSnapshot {
+    const id = sanitizeClientId(clientId);
+    if (!id) {
+      throw new RoomError('INVALID_CLIENT', 'clientId inválido.');
+    }
     const code = normalizeRoomId(roomId);
     if (!/^[A-Z0-9]{4,8}$/.test(code)) {
       throw new RoomError('ROOM_NOT_FOUND', 'Código de sala inválido.');
     }
     if (this.rooms.has(code)) {
-      return this.join(code, clientId, socketId, name);
+      return this.join(code, id, socketId, name);
     }
 
     const participant: Participant = {
-      clientId,
+      clientId: id,
       socketId,
       name: sanitizeName(name),
       color: PARTICIPANT_COLORS[0],
@@ -191,11 +227,31 @@ export class RoomStore {
       id: code,
       xml,
       revision,
-      participants: new Map([[clientId, participant]]),
+      legend: sanitizeLegend(legend),
+      participants: new Map([[id, participant]]),
       idleTimer: null,
     };
     this.rooms.set(code, room);
     return this.toSnapshot(room);
+  }
+
+  updateLegend(
+    roomId: string,
+    socketId: string,
+    legend: LegendEntry[]
+  ): { legend: LegendEntry[]; clientId: string } | null {
+    const room = this.rooms.get(normalizeRoomId(roomId));
+    if (!room) {
+      return null;
+    }
+    const participant = [...room.participants.values()].find(
+      (p) => p.socketId === socketId
+    );
+    if (!participant) {
+      return null;
+    }
+    room.legend = sanitizeLegend(legend);
+    return { legend: room.legend, clientId: participant.clientId };
   }
 
   /**
@@ -516,6 +572,7 @@ export class RoomStore {
       xml: room.xml,
       revision: room.revision,
       participants: this.toPublicParticipants(room),
+      legend: room.legend.map((entry) => ({ ...entry })),
     };
   }
 }

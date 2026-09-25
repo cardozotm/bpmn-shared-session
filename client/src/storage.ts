@@ -1,4 +1,5 @@
-import type { ActiveSession } from './types';
+import type { ActiveSession, LegendEntry } from './types';
+import { DEFAULT_LEGEND } from './types';
 
 const CLIENT_ID_KEY = 'bpmn-client-id';
 const SESSION_KEY = 'bpmn-active-session';
@@ -11,6 +12,7 @@ export interface SavedRoomDiagram {
   revision: number;
   updatedAt: number;
   name?: string;
+  legend?: LegendEntry[];
 }
 
 type SavedRoomsMap = Record<string, SavedRoomDiagram>;
@@ -83,7 +85,8 @@ export function saveRoomDiagram(
   roomId: string,
   xml: string,
   revision: number,
-  name?: string
+  name?: string,
+  legend?: LegendEntry[]
 ): void {
   const id = roomId.trim().toUpperCase();
   if (!id || !xml) {
@@ -97,6 +100,7 @@ export function saveRoomDiagram(
     revision,
     updatedAt: Date.now(),
     name: name ?? previous?.name,
+    legend: legend ?? previous?.legend ?? DEFAULT_LEGEND.map((e) => ({ ...e })),
   };
   writeRoomsMap(map);
 }
@@ -120,6 +124,18 @@ export function touchSavedRoomName(roomId: string, name: string): void {
     return;
   }
   existing.name = name;
+  existing.updatedAt = Date.now();
+  writeRoomsMap(map);
+}
+
+export function saveRoomLegend(roomId: string, legend: LegendEntry[]): void {
+  const id = roomId.trim().toUpperCase();
+  const map = readRoomsMap();
+  const existing = map[id];
+  if (!existing) {
+    return;
+  }
+  existing.legend = legend.map((entry) => ({ ...entry }));
   existing.updatedAt = Date.now();
   writeRoomsMap(map);
 }

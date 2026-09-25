@@ -1,9 +1,21 @@
 import BpmnModeler from 'bpmn-js/lib/Modeler';
+import camundaModdle from 'camunda-bpmn-moddle/resources/camunda.json';
 import 'bpmn-js/dist/assets/diagram-js.css';
 import 'bpmn-js/dist/assets/bpmn-js.css';
 import 'bpmn-js/dist/assets/bpmn-font/css/bpmn-embedded.css';
 
+import {
+  applyElementColor,
+  cloneLegend,
+  downloadBlob,
+  exportPng,
+  exportSvg,
+} from './diagram-tools';
 import { attachCollaboration, type CollaborationHandle } from './editor';
+import {
+  attachPropertiesPanel,
+  type PropertiesPanelHandle,
+} from './properties-panel';
 import {
   clearActiveSession,
   createSocket,
@@ -14,15 +26,18 @@ import {
   loadRoomDiagram,
   saveActiveSession,
   saveRoomDiagram,
+  saveRoomLegend,
   touchSavedRoomName,
 } from './socket';
 import type {
   DiagramUpdateResult,
+  LegendEntry,
   ParticipantPublic,
   RoomCreateResult,
   RoomJoinResult,
   RoomSnapshot,
 } from './types';
+import { DEFAULT_LEGEND } from './types';
 import './style.css';
 
 const app = document.querySelector<HTMLDivElement>('#app');
@@ -33,11 +48,14 @@ if (!app) {
 const clientId = getOrCreateClientId();
 const socket = createSocket();
 let collaboration: CollaborationHandle | null = null;
+let propertiesPanel: PropertiesPanelHandle | null = null;
 let modeler: BpmnModeler | null = null;
 let activeRoomId: string | null = null;
 let activeName: string | null = null;
 let inEditor = false;
 let rejoining = false;
+let currentLegend: LegendEntry[] = cloneLegend(DEFAULT_LEGEND);
+let legendOutsideClickHandler: ((event: MouseEvent) => void) | null = null;
 
 const params = new URLSearchParams(window.location.search);
 const prefilledRoom = (params.get('room') ?? '').toUpperCase();
@@ -59,6 +77,7 @@ async function joinRoom(roomId: string, name: string): Promise<RoomJoinResult> {
         clientId,
         restoreXml: local?.xml,
         restoreRevision: local?.revision,
+        restoreLegend: local?.legend,
       },
       cb
     )
@@ -73,7 +92,13 @@ async function reconcileWithLocalStorage(
   touchSavedRoomName(snapshot.roomId, name);
 
   if (!local) {
-    saveRoomDiagram(snapshot.roomId, snapshot.xml, snapshot.revision, name);
+    saveRoomDiagram(
+      snapshot.roomId,
+      snapshot.xml,
+      snapshot.revision,
+      name,
+      snapshot.legend
+    );
     return snapshot;
   }
 
@@ -85,21 +110,42 @@ async function reconcileWithLocalStorage(
           roomId: snapshot.roomId,
           xml: local.xml,
           revision: local.revision,
+          source: 'restore',
         },
         cb
       )
     );
     if (restored.ok) {
-      saveRoomDiagram(snapshot.roomId, local.xml, restored.revision, name);
+      const legend = local.legend ?? snapshot.legend;
+      saveRoomDiagram(
+        snapshot.roomId,
+        local.xml,
+        restored.revision,
+        name,
+        legend
+      );
+      if (legend) {
+        socket.emit('legend:update', {
+          roomId: snapshot.roomId,
+          legend,
+        });
+      }
       return {
         ...snapshot,
         xml: local.xml,
         revision: restored.revision,
+        legend: legend ?? snapshot.legend,
       };
     }
   }
 
-  saveRoomDiagram(snapshot.roomId, snapshot.xml, snapshot.revision, name);
+  saveRoomDiagram(
+    snapshot.roomId,
+    snapshot.xml,
+    snapshot.revision,
+    name,
+    snapshot.legend
+  );
   return snapshot;
 }
 
@@ -169,7 +215,7 @@ function renderLobby(initialRoomId = ''): void {
     <main class="lobby">
       <div class="lobby-card">
         <h1>BPMN compartilhado</h1>
-        <p class="subtitle">Até 5 usuários editam o mesmo diagrama em tempo real. O desenho fica salvo neste navegador.</p>
+        <p class="subtitle">Até 5 usuários editam o mesmo diagrama em tempo real. O desenho fica salvo neste navegador e na nuvem quando configurado.</p>
         <label class="field">
           <span>Seu nome</span>
           <input id="name-input" type="text" maxlength="32" placeholder="Ex.: Ana" autocomplete="nickname" />
@@ -305,6 +351,7 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
   saveActiveSession(snapshot.roomId, name);
 
   const reconciled = await reconcileWithLocalStorage(snapshot, name);
+  currentLegend = cloneLegend(reconciled.legend);
 
   const url = new URL(window.location.href);
   url.searchParams.set('room', reconciled.roomId);
@@ -320,31 +367,52 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
         </div>
         <div id="participants" class="participants"></div>
         <div class="toolbar-right">
+          <div class="color-palette" id="color-palette" title="Cor do elemento selecionado"></div>
+          <button id="legend-btn" type="button" class="ghost">Legenda</button>
           <span id="conn-status" class="pill">Online</span>
           <span id="revision" class="pill muted">rev ${reconciled.revision}</span>
           <button id="import-btn" type="button">Importar .bpmn</button>
-          <button id="download-btn" type="button">Baixar .bpmn</button>
+          <div class="export-group">
+            <button id="download-bpmn-btn" type="button">BPMN</button>
+            <button id="download-svg-btn" type="button">SVG</button>
+            <button id="download-png-btn" type="button">PNG</button>
+          </div>
           <button id="leave-btn" type="button" class="ghost">Sair</button>
           <input id="import-input" type="file" accept=".bpmn,.xml,application/xml,text/xml" hidden />
         </div>
       </header>
       <p id="banner" class="banner" hidden></p>
-      <div id="canvas" class="canvas"></div>
+      <div class="editor-body">
+        <div id="canvas" class="canvas"></div>
+        <aside id="properties" class="properties-aside"></aside>
+      </div>
+      <div id="legend-popover" class="legend-popover" hidden></div>
     </div>
   `;
 
   const canvasEl = document.querySelector<HTMLDivElement>('#canvas')!;
+  const propertiesEl = document.querySelector<HTMLElement>('#properties')!;
   const participantsEl = document.querySelector<HTMLDivElement>('#participants')!;
   const revisionEl = document.querySelector<HTMLSpanElement>('#revision')!;
   const connStatusEl = document.querySelector<HTMLSpanElement>('#conn-status')!;
   const bannerEl = document.querySelector<HTMLParagraphElement>('#banner')!;
+  const colorPaletteEl = document.querySelector<HTMLDivElement>('#color-palette')!;
+  const legendBtn = document.querySelector<HTMLButtonElement>('#legend-btn')!;
+  const legendPopover = document.querySelector<HTMLDivElement>('#legend-popover')!;
   const copyLinkBtn = document.querySelector<HTMLButtonElement>('#copy-link-btn')!;
   const importBtn = document.querySelector<HTMLButtonElement>('#import-btn')!;
   const importInput = document.querySelector<HTMLInputElement>('#import-input')!;
-  const downloadBtn = document.querySelector<HTMLButtonElement>('#download-btn')!;
+  const downloadBpmnBtn = document.querySelector<HTMLButtonElement>('#download-bpmn-btn')!;
+  const downloadSvgBtn = document.querySelector<HTMLButtonElement>('#download-svg-btn')!;
+  const downloadPngBtn = document.querySelector<HTMLButtonElement>('#download-png-btn')!;
   const leaveBtn = document.querySelector<HTMLButtonElement>('#leave-btn')!;
 
-  modeler = new BpmnModeler({ container: canvasEl });
+  modeler = new BpmnModeler({
+    container: canvasEl,
+    moddleExtensions: {
+      camunda: camundaModdle,
+    },
+  });
   (window as unknown as { __bpmnModeler?: BpmnModeler }).__bpmnModeler = modeler;
 
   try {
@@ -360,6 +428,10 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
     showBanner('Não foi possível carregar o diagrama inicial.');
   }
 
+  propertiesPanel = attachPropertiesPanel(modeler, propertiesEl);
+  renderColorPalette(colorPaletteEl);
+  renderLegendPopover(legendPopover, currentLegend);
+
   renderParticipants(participantsEl, reconciled.participants, clientId);
 
   collaboration = attachCollaboration({
@@ -367,6 +439,7 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
     socket,
     roomId: reconciled.roomId,
     initialRevision: reconciled.revision,
+    initialLegend: currentLegend,
     localClientId: clientId,
     onRevision: (revision) => {
       revisionEl.textContent = `rev ${revision}`;
@@ -376,6 +449,14 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
     },
     onParticipants: (participants) => {
       renderParticipants(participantsEl, participants, clientId);
+    },
+    onImportOverwrite: () => {
+      showBanner('Alguém importou um arquivo e substituiu o diagrama.');
+    },
+    onLegend: (legend) => {
+      currentLegend = cloneLegend(legend);
+      renderColorPalette(colorPaletteEl);
+      renderLegendPopover(legendPopover, currentLegend);
     },
   });
 
@@ -398,6 +479,25 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
     }
   });
 
+  legendBtn.addEventListener('click', () => {
+    legendPopover.hidden = !legendPopover.hidden;
+  });
+
+  if (legendOutsideClickHandler) {
+    document.removeEventListener('click', legendOutsideClickHandler);
+  }
+  legendOutsideClickHandler = (event: MouseEvent) => {
+    const target = event.target as Node;
+    if (
+      !legendPopover.hidden &&
+      !legendPopover.contains(target) &&
+      target !== legendBtn
+    ) {
+      legendPopover.hidden = true;
+    }
+  };
+  document.addEventListener('click', legendOutsideClickHandler);
+
   importBtn.addEventListener('click', () => {
     importInput.value = '';
     importInput.click();
@@ -411,7 +511,7 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
     void importBpmnFile(file);
   });
 
-  downloadBtn.addEventListener('click', async () => {
+  downloadBpmnBtn.addEventListener('click', async () => {
     if (!modeler) {
       return;
     }
@@ -420,16 +520,37 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
       if (!xml) {
         return;
       }
-      const blob = new Blob([xml], { type: 'application/xml' });
-      const href = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = href;
-      anchor.download = `diagrama-${reconciled.roomId}.bpmn`;
-      anchor.click();
-      URL.revokeObjectURL(href);
+      downloadBlob(
+        new Blob([xml], { type: 'application/xml' }),
+        `diagrama-${reconciled.roomId}.bpmn`
+      );
     } catch (error) {
       console.error(error);
       showBanner('Falha ao exportar o diagrama.');
+    }
+  });
+
+  downloadSvgBtn.addEventListener('click', async () => {
+    if (!modeler) {
+      return;
+    }
+    try {
+      await exportSvg(modeler, `diagrama-${reconciled.roomId}.svg`);
+    } catch (error) {
+      console.error(error);
+      showBanner('Falha ao exportar SVG.');
+    }
+  });
+
+  downloadPngBtn.addEventListener('click', async () => {
+    if (!modeler) {
+      return;
+    }
+    try {
+      await exportPng(modeler, `diagrama-${reconciled.roomId}.png`);
+    } catch (error) {
+      console.error(error);
+      showBanner('Falha ao exportar PNG.');
     }
   });
 
@@ -443,7 +564,8 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
             roomId,
             xml,
             collaboration?.getRevision() ?? 0,
-            activeName ?? undefined
+            activeName ?? undefined,
+            collaboration?.getLegend()
           );
         }
       } catch {
@@ -461,6 +583,84 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
     renderLobby();
   });
 
+  function renderColorPalette(container: HTMLElement): void {
+    container.innerHTML = currentLegend
+      .map(
+        (entry, index) => `
+        <button
+          type="button"
+          class="color-swatch"
+          data-index="${index}"
+          title="${escapeAttr(entry.label)}"
+          style="--swatch:${escapeAttr(entry.fill)};--swatch-stroke:${escapeAttr(entry.stroke ?? entry.fill)}"
+          aria-label="${escapeAttr(entry.label)}"
+        ></button>
+      `
+      )
+      .join('');
+
+    for (const btn of container.querySelectorAll<HTMLButtonElement>('.color-swatch')) {
+      btn.addEventListener('click', () => {
+        if (!modeler) {
+          return;
+        }
+        const index = Number(btn.dataset.index);
+        const entry = currentLegend[index];
+        if (!entry) {
+          return;
+        }
+        const applied = applyElementColor(modeler, entry.fill, entry.stroke);
+        if (!applied) {
+          showBanner('Selecione um elemento para colorir.');
+        }
+      });
+    }
+  }
+
+  function renderLegendPopover(
+    container: HTMLElement,
+    legend: LegendEntry[]
+  ): void {
+    container.innerHTML = `
+      <p class="legend-title">Legenda das cores</p>
+      <ul class="legend-list">
+        ${legend
+          .map(
+            (entry, index) => `
+          <li class="legend-item">
+            <span class="legend-swatch" style="background:${escapeAttr(entry.fill)};border-color:${escapeAttr(entry.stroke ?? '#94a3b8')}"></span>
+            <input
+              type="text"
+              class="legend-label-input"
+              data-index="${index}"
+              maxlength="64"
+              value="${escapeAttr(entry.label)}"
+            />
+          </li>
+        `
+          )
+          .join('')}
+      </ul>
+    `;
+
+    for (const input of container.querySelectorAll<HTMLInputElement>(
+      '.legend-label-input'
+    )) {
+      input.addEventListener('change', () => {
+        const index = Number(input.dataset.index);
+        if (!Number.isFinite(index) || !currentLegend[index]) {
+          return;
+        }
+        currentLegend = currentLegend.map((entry, i) =>
+          i === index ? { ...entry, label: input.value.trim() || entry.label } : entry
+        );
+        saveRoomLegend(reconciled.roomId, currentLegend);
+        collaboration?.setLegend(currentLegend);
+        renderColorPalette(colorPaletteEl);
+      });
+    }
+  }
+
   async function importBpmnFile(file: File): Promise<void> {
     if (!modeler || !activeRoomId) {
       return;
@@ -470,6 +670,16 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
     if (!lower.endsWith('.bpmn') && !lower.endsWith('.xml')) {
       showBanner('Selecione um arquivo .bpmn ou .xml.');
       return;
+    }
+
+    const currentRevision = collaboration?.getRevision() ?? 0;
+    if (currentRevision > 0) {
+      const confirmed = window.confirm(
+        'Importar este arquivo substitui o diagrama atual para todos na sala. Continuar?'
+      );
+      if (!confirmed) {
+        return;
+      }
     }
 
     let xml: string;
@@ -502,6 +712,7 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
             roomId: activeRoomId!,
             xml,
             revision: suggestedRevision,
+            source: 'import',
           },
           cb
         )
@@ -516,7 +727,8 @@ async function openEditor(snapshot: RoomSnapshot, name: string): Promise<void> {
         activeRoomId,
         xml,
         restored.revision,
-        activeName ?? undefined
+        activeName ?? undefined,
+        currentLegend
       );
 
       await collaboration?.loadImportedDiagram(xml, restored.revision);
@@ -569,6 +781,12 @@ function renderParticipants(
 }
 
 function disposeSession(): void {
+  if (legendOutsideClickHandler) {
+    document.removeEventListener('click', legendOutsideClickHandler);
+    legendOutsideClickHandler = null;
+  }
+  propertiesPanel?.dispose();
+  propertiesPanel = null;
   collaboration?.dispose();
   collaboration = null;
   if (modeler) {

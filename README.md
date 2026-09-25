@@ -5,19 +5,19 @@ Web app where up to five users join the same room and edit a [bpmn-js](https://b
 ## Stack
 
 - **Client**: Vite, TypeScript, bpmn-js Modeler, Socket.IO client
-- **Server**: Node.js, Express, Socket.IO (in-memory rooms)
+- **Server**: Node.js, Express, Socket.IO (in-memory rooms + optional Supabase persistence)
 - **Host**: [Render](https://render.com) (single Web Service serves the built client + API)
 
-No login and no database. Rooms live in server memory.
+No login. Rooms live in server memory while the process is awake. When `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set, the latest XML, revision, and color legend for each room are upserted to Postgres so the diagram survives Render sleep.
 
 ### Resilience
 
 - Each browser gets a stable `clientId` in `localStorage`. Reconnects reuse the same seat (not an extra user).
 - Transport disconnects keep the seat for **45 seconds** so a refresh or brief network blip can rejoin.
 - After the last participant leaves (or grace expires), the room XML is kept for **24 hours** while the process stays awake.
-- Diagram XML is also persisted in the browser `localStorage` (per room code). Leaving and returning — even after a Render sleep — restores the drawing from local storage and recreates the room on the server when needed.
+- Diagram XML is also persisted in the browser `localStorage` (per room code). Leaving and returning — even after a Render sleep — restores the drawing from local storage (and from Supabase when configured) and recreates the room on the server when needed.
 - Active session and a short list of recent rooms are kept in `localStorage`.
-- **Limit:** local persistence is per browser/device; another device only sees what the live server still has.
+- **Limit:** without Supabase, local persistence is per browser/device; another device only sees what the live server still has.
 
 ## Quick start (local)
 
@@ -28,6 +28,13 @@ npm run dev
 
 - App: http://localhost:5173  
 - API / Socket.IO: http://localhost:8765  
+
+Optional persistence (apply [`supabase/migrations/20260325140000_rooms.sql`](supabase/migrations/20260325140000_rooms.sql) in your project, then):
+
+```bash
+export SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+export SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY
+```
 
 Open two or more browser windows. In the first, enter a name and click **Criar sessão**. Copy the link or room code. In the others, enter a name and the code, then **Entrar na sessão**. Draw on either side; the other clients update after a short debounce.
 
@@ -51,9 +58,9 @@ The Express server serves `client/dist` and Socket.IO on the same origin (port f
 
 **One-click Blueprint (new environments):** [Deploy to Render](https://dashboard.render.com/blueprint/new?repo=https://github.com/cardozotm/bpmn-shared-session)
 
-Render runs `npm install --include=dev && npm run build`, then `npm start`, with `NODE_ENV=production`.
+Render runs `npm install --include=dev && npm run build`, then `npm start`, with `NODE_ENV=production`. Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in the Render dashboard for cloud persistence.
 
-On the free tier the service sleeps when idle; in-memory rooms are cleared when the process stops.
+On the free tier the service sleeps when idle; in-memory rooms are cleared when the process stops (Supabase keeps the last snapshot when configured).
 
 ## Scripts
 
@@ -68,7 +75,8 @@ On the free tier the service sleeps when idle; in-memory rooms are cleared when 
 
 1. Local edits fire `commandStack.changed`.
 2. After ~250 ms the client exports XML and sends `diagram:update` with `baseRevision`.
-3. The server accepts the update only if `baseRevision` matches the canonical revision, then broadcasts `diagram:state`.
+3. The server accepts the update only if `baseRevision` matches the canonical revision, then broadcasts `diagram:state` and upserts the room row when Supabase is enabled.
 4. Remote clients `importXML` with a flag so the import does not echo back; the canvas viewbox is restored so zoom does not jump.
 5. Selection changes are shared as presence so the peer outline can highlight the selected element.
 6. On Socket.IO reconnect the client re-joins with the same `clientId` and applies the server snapshot if the revision advanced.
+7. Element colors live in the BPMN DI; the editable color legend is synced via `legend:update` / `legend:state`.

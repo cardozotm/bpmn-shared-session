@@ -1,7 +1,12 @@
 import type BpmnModeler from 'bpmn-js/lib/Modeler';
 import type { AppSocket } from './socket';
-import { saveRoomDiagram } from './storage';
-import type { CursorStatePayload, ParticipantPublic, RoomSnapshot } from './types';
+import { saveRoomDiagram, saveRoomLegend } from './storage';
+import type {
+  CursorStatePayload,
+  LegendEntry,
+  ParticipantPublic,
+  RoomSnapshot,
+} from './types';
 
 const DEBOUNCE_MS = 250;
 const CURSOR_THROTTLE_MS = 40;
@@ -22,6 +27,8 @@ export interface CollaborationHandle {
   loadImportedDiagram: (xml: string, revision: number) => Promise<void>;
   flush: () => Promise<void>;
   getRevision: () => number;
+  setLegend: (legend: LegendEntry[]) => void;
+  getLegend: () => LegendEntry[];
 }
 
 interface SyncOptions {
@@ -29,10 +36,13 @@ interface SyncOptions {
   socket: AppSocket;
   roomId: string;
   initialRevision: number;
+  initialLegend: LegendEntry[];
   localClientId: string;
   onRevision: (revision: number) => void;
   onConflict: (message: string) => void;
   onParticipants: (participants: ParticipantPublic[]) => void;
+  onImportOverwrite?: () => void;
+  onLegend: (legend: LegendEntry[]) => void;
 }
 
 export function attachCollaboration(options: SyncOptions): CollaborationHandle {
@@ -44,9 +54,12 @@ export function attachCollaboration(options: SyncOptions): CollaborationHandle {
     onRevision,
     onConflict,
     onParticipants,
+    onImportOverwrite,
+    onLegend,
   } = options;
 
   let revision = options.initialRevision;
+  let legend = options.initialLegend.map((entry) => ({ ...entry }));
   let applyingRemote = false;
   let debounceTimer: number | null = null;
   let cursorThrottleTimer: number | null = null;
@@ -143,11 +156,15 @@ export function attachCollaboration(options: SyncOptions): CollaborationHandle {
     xml: string;
     revision: number;
     fromClientId: string;
+    source?: 'import' | 'edit' | 'restore';
   }) => {
     if (payload.fromClientId === localClientId || destroyed) {
       return;
     }
     await applyRemoteXml(payload.xml, payload.revision);
+    if (payload.source === 'import') {
+      onImportOverwrite?.();
+    }
   };
 
   const onPresenceState = (payload: { participants: ParticipantPublic[] }) => {
@@ -171,9 +188,22 @@ export function attachCollaboration(options: SyncOptions): CollaborationHandle {
     showRemoteCursor(payload);
   };
 
+  const onLegendState = (payload: {
+    legend: LegendEntry[];
+    fromClientId: string;
+  }) => {
+    if (destroyed) {
+      return;
+    }
+    legend = payload.legend.map((entry) => ({ ...entry }));
+    saveRoomLegend(roomId, legend);
+    onLegend(legend);
+  };
+
   socket.on('diagram:state', onDiagramState);
   socket.on('presence:state', onPresenceState);
   socket.on('cursor:state', onCursorState);
+  socket.on('legend:state', onLegendState);
 
   function clientToDiagram(
     clientX: number,
@@ -299,7 +329,7 @@ export function attachCollaboration(options: SyncOptions): CollaborationHandle {
           if (result.ok) {
             revision = result.revision;
             onRevision(revision);
-            saveRoomDiagram(roomId, xml, revision);
+            saveRoomDiagram(roomId, xml, revision, undefined, legend);
             return;
           }
 
@@ -323,7 +353,7 @@ export function attachCollaboration(options: SyncOptions): CollaborationHandle {
       canvas.resized?.();
       revision = nextRevision;
       onRevision(revision);
-      saveRoomDiagram(roomId, xml, revision);
+      saveRoomDiagram(roomId, xml, revision, undefined, legend);
       repositionRemoteCursors();
     } catch (error) {
       console.error('Failed to import remote diagram', error);
@@ -338,6 +368,11 @@ export function attachCollaboration(options: SyncOptions): CollaborationHandle {
     }
     onParticipants(snapshot.participants);
     paintRemoteSelections(snapshot.participants);
+    if (snapshot.legend) {
+      legend = snapshot.legend.map((entry) => ({ ...entry }));
+      saveRoomLegend(roomId, legend);
+      onLegend(legend);
+    }
     if (snapshot.revision !== revision) {
       await applyRemoteXml(snapshot.xml, snapshot.revision);
     } else {
@@ -434,6 +469,7 @@ export function attachCollaboration(options: SyncOptions): CollaborationHandle {
       socket.off('diagram:state', onDiagramState);
       socket.off('presence:state', onPresenceState);
       socket.off('cursor:state', onCursorState);
+      socket.off('legend:state', onLegendState);
       for (const clientId of [...remoteCursors.keys()]) {
         removeRemoteCursor(clientId);
       }
@@ -443,5 +479,12 @@ export function attachCollaboration(options: SyncOptions): CollaborationHandle {
     loadImportedDiagram,
     flush: pushLocalXml,
     getRevision: () => revision,
+    setLegend: (next) => {
+      legend = next.map((entry) => ({ ...entry }));
+      saveRoomLegend(roomId, legend);
+      socket.emit('legend:update', { roomId, legend });
+      onLegend(legend);
+    },
+    getLegend: () => legend.map((entry) => ({ ...entry })),
   };
 }

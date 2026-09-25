@@ -200,6 +200,27 @@ describe('RoomStore', () => {
     vi.advanceTimersByTime(1);
     expect(store.size()).toBe(0);
   });
+  it('includes a default legend on create', () => {
+    const store = new RoomStore({ codeGenerator: () => 'LEG001' });
+    const snapshot = store.create(
+      'client-a',
+      'socket-1',
+      'Alice',
+      EMPTY_DIAGRAM_XML
+    );
+    expect(snapshot.legend.length).toBeGreaterThan(0);
+    expect(snapshot.legend[0]?.label).toBe('A fazer');
+  });
+
+  it('updates legend labels for a participant in the room', () => {
+    const store = new RoomStore({ codeGenerator: () => 'LEG002' });
+    store.create('client-a', 'socket-1', 'Alice', EMPTY_DIAGRAM_XML);
+    const updated = store.updateLegend('LEG002', 'socket-1', [
+      { fill: '#fff', label: 'Custom' },
+    ]);
+    expect(updated?.legend).toEqual([{ fill: '#fff', label: 'Custom' }]);
+    expect(store.getSnapshot('LEG002')?.legend[0]?.label).toBe('Custom');
+  });
 });
 
 describe('sanitizeName', () => {

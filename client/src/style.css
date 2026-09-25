@@ -154,6 +154,7 @@ button.ghost {
 }
 
 .editor-shell {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -245,12 +246,154 @@ button.ghost {
   display: none !important;
 }
 
+.editor-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+
 .canvas {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
   width: 100%;
   background: #fafafa;
+}
+
+.properties-aside {
+  width: 280px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  background: #fff;
+  overflow: auto;
+}
+
+.props-panel {
+  padding: 14px;
+}
+
+.props-title {
+  margin: 0 0 12px;
+  font-size: 0.95rem;
+}
+
+.props-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.props-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.props-field {
+  display: grid;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.props-field input,
+.props-field textarea {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  color: var(--text);
+  background: #fff;
+  resize: vertical;
+}
+
+.props-field input:focus,
+.props-field textarea:focus {
+  outline: 2px solid rgba(37, 99, 235, 0.35);
+  border-color: var(--primary);
+}
+
+.color-palette {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.color-swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 6px;
+  border: 2px solid var(--swatch-stroke, #94a3b8);
+  background: var(--swatch, #e2e8f0);
+}
+
+.color-swatch:hover:not(:disabled) {
+  transform: scale(1.08);
+  background: var(--swatch, #e2e8f0);
+}
+
+.export-group {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.export-group button {
+  padding: 8px 10px;
+  font-size: 0.85rem;
+}
+
+.legend-popover {
+  position: absolute;
+  top: 58px;
+  right: 16px;
+  z-index: 30;
+  width: min(280px, calc(100% - 32px));
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 12px;
+}
+
+.legend-popover[hidden] {
+  display: none !important;
+}
+
+.legend-title {
+  margin: 0 0 10px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.legend-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.legend-item {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.legend-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid #94a3b8;
+  flex-shrink: 0;
+}
+
+.legend-label-input {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font: inherit;
 }
 
 .canvas .bjs-container,

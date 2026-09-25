@@ -5,13 +5,20 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
+import { createRoomPersistence } from './persistence.js';
 import {
+  allocateRoomCode,
+  DEFAULT_LEGEND,
   EMPTY_DIAGRAM_XML,
+  normalizeRoomId,
   RoomError,
   RoomStore,
+  sanitizeClientId,
+  sanitizeName,
 } from './rooms.js';
 import type {
   ClientToServerEvents,
+  LegendEntry,
   ServerToClientEvents,
 } from './types.js';
 
@@ -34,70 +41,147 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
 });
 
 const rooms = new RoomStore();
+const persistence = createRoomPersistence();
+
+if (persistence.enabled) {
+  console.log('[persistence] Supabase adapter enabled');
+} else {
+  console.log('[persistence] No-op (set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)');
+}
+
+async function persistRoom(roomId: string): Promise<void> {
+  const snapshot = rooms.getSnapshot(roomId);
+  if (!snapshot) {
+    return;
+  }
+  await persistence.save({
+    id: snapshot.roomId,
+    xml: snapshot.xml,
+    revision: snapshot.revision,
+    legend: snapshot.legend,
+  });
+}
+
+async function allocateUniqueCode(): Promise<string> {
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    const code = allocateRoomCode();
+    if (rooms.has(code)) {
+      continue;
+    }
+    if (await persistence.exists(code)) {
+      continue;
+    }
+    return code;
+  }
+  throw new Error('Unable to allocate room code');
+}
 
 io.on('connection', (socket) => {
   let currentRoomId: string | null = null;
   let currentClientId: string | null = null;
 
   socket.on('room:create', (payload, callback) => {
-    try {
-      if (currentRoomId) {
-        leaveExplicit();
-      }
+    void (async () => {
+      try {
+        if (currentRoomId) {
+          leaveExplicit();
+        }
 
-      const snapshot = rooms.create(
-        payload?.clientId ?? '',
-        socket.id,
-        payload?.name ?? '',
-        EMPTY_DIAGRAM_XML
-      );
-      currentRoomId = snapshot.roomId;
-      currentClientId = payload.clientId;
-      void socket.join(snapshot.roomId);
-      callback({ ok: true, snapshot });
-    } catch (error) {
-      callback({
-        ok: false,
-        error: error instanceof Error ? error.message : 'Falha ao criar sala.',
-      });
-    }
+        const clientId = sanitizeClientId(payload?.clientId ?? '');
+        const name = sanitizeName(payload?.name ?? '');
+        const code = await allocateUniqueCode();
+        const snapshot = rooms.createWithId(
+          code,
+          clientId,
+          socket.id,
+          name,
+          EMPTY_DIAGRAM_XML,
+          0,
+          DEFAULT_LEGEND
+        );
+        currentRoomId = snapshot.roomId;
+        currentClientId = clientId;
+        void socket.join(snapshot.roomId);
+        await persistRoom(snapshot.roomId);
+        callback({ ok: true, snapshot });
+      } catch (error) {
+        callback({
+          ok: false,
+          error: error instanceof Error ? error.message : 'Falha ao criar sala.',
+        });
+      }
+    })();
   });
 
   socket.on('room:join', (payload, callback) => {
-    try {
-      if (currentRoomId && currentRoomId !== payload.roomId.trim().toUpperCase()) {
-        leaveExplicit();
-      }
+    void (async () => {
+      try {
+        const roomId = normalizeRoomId(payload.roomId);
+        if (currentRoomId && currentRoomId !== roomId) {
+          leaveExplicit();
+        }
 
-      const snapshot = rooms.join(
-        payload.roomId,
-        payload?.clientId ?? '',
-        socket.id,
-        payload?.name ?? '',
-        payload.restoreXml
-          ? {
-              xml: payload.restoreXml,
-              revision: payload.restoreRevision ?? 0,
-            }
-          : null
-      );
-      currentRoomId = snapshot.roomId;
-      currentClientId = payload.clientId;
-      void socket.join(snapshot.roomId);
-      socket.to(snapshot.roomId).emit('presence:state', {
-        participants: snapshot.participants,
-      });
-      callback({ ok: true, snapshot });
-    } catch (error) {
-      if (error instanceof RoomError) {
-        callback({ ok: false, error: error.message });
-        return;
+        const clientId = sanitizeClientId(payload?.clientId ?? '');
+        const name = sanitizeName(payload?.name ?? '');
+        const restoreLegend = payload.restoreLegend as LegendEntry[] | undefined;
+
+        if (!rooms.has(roomId)) {
+          const persisted = await persistence.load(roomId);
+          if (persisted) {
+            rooms.createWithId(
+              roomId,
+              clientId,
+              socket.id,
+              name,
+              persisted.xml,
+              persisted.revision,
+              persisted.legend.length > 0 ? persisted.legend : DEFAULT_LEGEND
+            );
+          } else if (
+            payload.restoreXml &&
+            typeof payload.restoreXml === 'string' &&
+            payload.restoreXml.trim().length > 0
+          ) {
+            rooms.createWithId(
+              roomId,
+              clientId,
+              socket.id,
+              name,
+              payload.restoreXml,
+              Math.max(0, Math.floor(payload.restoreRevision ?? 0) || 0),
+              restoreLegend
+            );
+            await persistRoom(roomId);
+          } else {
+            throw new RoomError('ROOM_NOT_FOUND', 'Sala não encontrada.');
+          }
+        } else {
+          rooms.join(roomId, clientId, socket.id, name, null);
+        }
+
+        const snapshot = rooms.getSnapshot(roomId);
+        if (!snapshot) {
+          throw new RoomError('ROOM_NOT_FOUND', 'Sala não encontrada.');
+        }
+
+        currentRoomId = snapshot.roomId;
+        currentClientId = clientId;
+        void socket.join(snapshot.roomId);
+        socket.to(snapshot.roomId).emit('presence:state', {
+          participants: snapshot.participants,
+        });
+        callback({ ok: true, snapshot });
+      } catch (error) {
+        if (error instanceof RoomError) {
+          callback({ ok: false, error: error.message });
+          return;
+        }
+        callback({
+          ok: false,
+          error: error instanceof Error ? error.message : 'Falha ao entrar na sala.',
+        });
       }
-      callback({
-        ok: false,
-        error: error instanceof Error ? error.message : 'Falha ao entrar na sala.',
-      });
-    }
+    })();
   });
 
   socket.on('room:leave', (payload, callback) => {
@@ -115,44 +199,70 @@ io.on('connection', (socket) => {
   });
 
   socket.on('diagram:update', (payload, callback) => {
-    const result = rooms.applyDiagramUpdate(
-      payload.roomId,
-      socket.id,
-      payload.baseRevision,
-      payload.xml
-    );
+    void (async () => {
+      const result = rooms.applyDiagramUpdate(
+        payload.roomId,
+        socket.id,
+        payload.baseRevision,
+        payload.xml
+      );
 
-    if (result.ok && result.clientId) {
-      socket.to(payload.roomId).emit('diagram:state', {
-        xml: payload.xml,
-        revision: result.revision,
-        fromClientId: result.clientId,
-      });
-    }
+      if (result.ok && result.clientId) {
+        await persistRoom(payload.roomId);
+        socket.to(payload.roomId).emit('diagram:state', {
+          xml: payload.xml,
+          revision: result.revision,
+          fromClientId: result.clientId,
+          source: 'edit',
+        });
+      }
 
-    callback(result);
+      callback(result);
+    })();
   });
 
   socket.on('diagram:restore', (payload, callback) => {
-    const result = rooms.restoreDiagram(
-      payload.roomId,
-      socket.id,
-      payload.xml,
-      payload.revision
-    );
+    void (async () => {
+      const result = rooms.restoreDiagram(
+        payload.roomId,
+        socket.id,
+        payload.xml,
+        payload.revision
+      );
 
-    if (result.ok && result.clientId) {
-      const snapshot = rooms.getSnapshot(payload.roomId);
-      if (snapshot) {
-        socket.to(payload.roomId).emit('diagram:state', {
-          xml: snapshot.xml,
-          revision: snapshot.revision,
-          fromClientId: result.clientId,
-        });
+      if (result.ok && result.clientId) {
+        await persistRoom(payload.roomId);
+        const snapshot = rooms.getSnapshot(payload.roomId);
+        if (snapshot) {
+          socket.to(payload.roomId).emit('diagram:state', {
+            xml: snapshot.xml,
+            revision: snapshot.revision,
+            fromClientId: result.clientId,
+            source: payload.source === 'import' ? 'import' : 'restore',
+          });
+        }
       }
-    }
 
-    callback(result);
+      callback(result);
+    })();
+  });
+
+  socket.on('legend:update', (payload) => {
+    void (async () => {
+      const updated = rooms.updateLegend(
+        payload.roomId,
+        socket.id,
+        payload.legend
+      );
+      if (!updated) {
+        return;
+      }
+      await persistRoom(payload.roomId);
+      io.to(payload.roomId).emit('legend:state', {
+        legend: updated.legend,
+        fromClientId: updated.clientId,
+      });
+    })();
   });
 
   socket.on('presence:update', (payload) => {

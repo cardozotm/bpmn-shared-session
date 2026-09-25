@@ -11,6 +11,7 @@ export {
   saveActiveSession,
   loadRoomDiagram,
   saveRoomDiagram,
+  saveRoomLegend,
   listSavedRooms,
   touchSavedRoomName,
 } from './storage';
